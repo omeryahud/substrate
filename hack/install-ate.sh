@@ -203,7 +203,6 @@ ensure_crds() {
 
 deploy_crds() {
   log_step "deploy_crds"
-  go generate ./api/v1alpha1 ./internal/controllers
   run_ko apply -f manifests/ate-install/generated
 }
 
@@ -216,8 +215,6 @@ deploy_ate_system() {
     && run_kubectl wait --for=jsonpath='{.status.phase}'=Active namespace/ate-system --timeout=60s
 
   ensure_apiserver_prerequisites
-
-  go generate ./proto/ateapipb ./proto/ateletpb
 
   # Deploy podcertificate-controller first so it starts signing and creating trust bundles immediately
   run_ko apply -f manifests/ate-install/pod-certificate-controller.yaml
@@ -263,8 +260,6 @@ deploy_ate_apiserver() {
   log_step "deploy_ate_apiserver"
   ensure_crds
 
-  go generate ./proto/ateapipb ./proto/ateletpb
-
   # Ensure namespace exists
   run_kubectl apply -f manifests/ate-install/ate-system-namespace.yaml \
     && run_kubectl wait --for=jsonpath='{.status.phase}'=Active namespace/ate-system --timeout=60s
@@ -277,8 +272,6 @@ deploy_ate_apiserver() {
 deploy_atelet() {
   log_step "deploy_atelet"
   ensure_crds
-
-  go generate ./proto/ateapipb ./proto/ateletpb
 
   # Ensure namespace exists
   run_kubectl apply -f manifests/ate-install/ate-system-namespace.yaml \
@@ -298,8 +291,6 @@ deploy_atelet() {
 deploy_atenet() {
   log_step "deploy_atenet"
   ensure_crds
-
-  go generate ./proto/ateapipb ./proto/ateletpb
 
   # Ensure namespace exists
   run_kubectl apply -f manifests/ate-install/ate-system-namespace.yaml \
