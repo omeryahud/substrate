@@ -32,10 +32,8 @@ spec:
 
 ## Prerequisites
 
-- An ate cluster **deployed from this branch** (`worktree-wp-autoscaling`), so
-  `ate-controller` runs the WorkerPool autoscaler and the CRD carries the new
-  `minReady` / `targetBuffer` / `maxReplicas` fields. A kind cluster via
-  `hack/install-ate-kind.sh` works.
+- An ate cluster deployed
+- A kind cluster via `hack/install-ate-kind.sh` works.
 - `KO_DOCKER_REPO` and `BUCKET_NAME` set (same as the other demos — `ko`
   resolves the `ko://` images and `BUCKET_NAME` is the GCS bucket for actor
   snapshots).
