@@ -35,6 +35,7 @@ KO="${KO:-hack/run-tool.sh ko}"            # how to resolve ko:// images
 NS="ate-demo-autoscaling"
 POOL="autoscaling"
 TEMPLATE="${NS}/${POOL}"
+ATESPACE="${ATESPACE:-demo-autoscaling}"   # atespace the demo actors live in
 N="${N:-6}"                                # actors to wake (drives the burst)
 SCALE_DOWN_WAIT="${SCALE_DOWN_WAIT:-180}"  # seconds to wait for hysteretic shrink
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -54,14 +55,18 @@ deploy() {
   render | ( cd "$ROOT" && $KO apply -f - )
   kubectl rollout status "deployment/${POOL}-deployment" -n "$NS" --timeout=300s
   kubectl wait --for=condition=Ready "actortemplate/${POOL}" -n "$NS" --timeout=300s
+  # Actors live in an atespace; make sure the demo's exists (idempotent-ish:
+  # AlreadyExists is fine).
+  $ATE create atespace "$ATESPACE" >/dev/null 2>&1 || true
 }
 
 cleanup() {
   banner "Cleanup"
   for i in $(seq 1 "$N"); do
-    $ATE suspend actor "demo-${i}" >/dev/null 2>&1 || true
-    $ATE delete actor "demo-${i}"  >/dev/null 2>&1 || true
+    $ATE suspend actor "demo-${i}" -a "$ATESPACE" >/dev/null 2>&1 || true
+    $ATE delete actor "demo-${i}" -a "$ATESPACE" >/dev/null 2>&1 || true
   done
+  $ATE delete atespace "$ATESPACE" >/dev/null 2>&1 || true
   render | kubectl delete --ignore-not-found -f -
 }
 
@@ -70,7 +75,7 @@ cleanup() {
 # fresh worker has booted. Bounded so the demo never hangs on slow cold starts.
 resume_with_retry() {
   local id="$1" tries=0
-  until $ATE resume actor "$id" >/dev/null 2>&1; do
+  until $ATE resume actor "$id" -a "$ATESPACE" >/dev/null 2>&1; do
     tries=$((tries + 1))
     if [ "$tries" -ge 15 ]; then
       echo "  resume ${id}: still no capacity after ${tries} tries (workers may still be booting)"
@@ -86,6 +91,7 @@ main() {
   if ! kubectl get workerpool "$POOL" -n "$NS" >/dev/null 2>&1; then
     deploy
   fi
+  $ATE create atespace "$ATESPACE" >/dev/null 2>&1 || true
 
   banner "Initial state — autoscaler holds the warm buffer (minReady=2, targetBuffer=2)"
   pool
@@ -96,7 +102,7 @@ main() {
 
   banner "Burst: waking ${N} actors — drains the buffer and triggers reactive scale-up"
   for i in $(seq 1 "$N"); do
-    $ATE create actor "demo-${i}" -t "$TEMPLATE" >/dev/null 2>&1 || true
+    $ATE create actor "demo-${i}" -t "$TEMPLATE" -a "$ATESPACE" >/dev/null 2>&1 || true
   done
   for i in $(seq 1 "$N"); do
     resume_with_retry "demo-${i}"
@@ -108,7 +114,7 @@ main() {
 
   banner "Idle: suspending all actors — frees workers, buffer goes into surplus"
   for i in $(seq 1 "$N"); do
-    $ATE suspend actor "demo-${i}" >/dev/null 2>&1 || true
+    $ATE suspend actor "demo-${i}" -a "$ATESPACE" >/dev/null 2>&1 || true
   done
   pool
   echo

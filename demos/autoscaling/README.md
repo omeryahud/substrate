@@ -20,7 +20,10 @@ refill that buffer fast and trim it slowly.
 
 `autoscaling.yaml.tmpl` creates the `ate-demo-autoscaling` namespace, an
 autoscaled `WorkerPool`, and an `ActorTemplate` that reuses the `counter`
-workload (the workload is irrelevant — the focus is the pool):
+workload (the workload is irrelevant — the focus is the pool). The template
+selects the pool via `workerSelector` (label `workload: autoscaling`), and the
+demo driver creates an atespace (`demo-autoscaling` by default, override with
+`ATESPACE=`) for the actors it wakes:
 
 ```yaml
 spec:
@@ -32,10 +35,8 @@ spec:
 
 ## Prerequisites
 
-- An ate cluster **deployed from this branch** (`worktree-wp-autoscaling`), so
-  `ate-controller` runs the WorkerPool autoscaler and the CRD carries the new
-  `minReady` / `targetBuffer` / `maxReplicas` fields. A kind cluster via
-  `hack/install-ate-kind.sh` works.
+- An ate cluster deployed
+- A kind cluster via `hack/install-ate-kind.sh` works.
 - `KO_DOCKER_REPO` and `BUCKET_NAME` set (same as the other demos — `ko`
   resolves the `ko://` images and `BUCKET_NAME` is the GCS bucket for actor
   snapshots).
@@ -65,7 +66,7 @@ The driver also accepts:
 ```
 
 Tunables (env vars): `N` (actors woken, default 6), `SCALE_DOWN_WAIT`
-(seconds to wait for the shrink, default 180), `ATE`, `KO`.
+(seconds to wait for the shrink, default 180), `ATESPACE`, `ATE`, `KO`.
 
 ## What you should see
 
@@ -88,8 +89,9 @@ getting `503` (there is no capacity left to create).
 ## How it works
 
 - ateapi publishes a pool-scoped `CapacityPressureEvent` whenever
-  `AssignWorkerStep` finds no free worker, exposed via the
-  `WatchCapacityPressure` streaming RPC.
+  `AssignWorkerStep` finds no free worker — one event per *eligible* pool
+  (eligibility = matching `sandboxClass` + the template/actor `workerSelector`s)
+  — exposed via the `WatchCapacityPressure` streaming RPC.
 - `WorkerPoolAutoscaler` (in `ate-controller`) subscribes to that stream and
   turns each event into an immediate reconcile of the pool. It also re-evaluates
   on a ~10s poll (the scale-down path and a safety net). It reads occupancy via
