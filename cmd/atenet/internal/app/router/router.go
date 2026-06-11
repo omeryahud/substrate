@@ -78,6 +78,13 @@ type RouterConfig struct {
 	EnvoyCertPath  string
 	LogLevel       string
 	MetricsAddr    string
+
+	// Request parking: hold and retry requests whose actor cannot be served
+	// immediately due to transient worker-pool saturation, instead of failing
+	// fast. See parkingConfig.
+	ParkingEnabled   bool
+	ParkingMaxWait   time.Duration
+	ParkingMaxParked int
 }
 
 // RouterServer instantiates and coordinates runtime threads executing system modules.
@@ -157,6 +164,9 @@ func NewCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&cfg.HealthInterval, "health-interval", 1*time.Second, "Interval for checking health of dependent services")
 	cmd.Flags().IntVar(&cfg.HttpsPort, "port-https", 8443, "TCP port for HTTPS workload traffic entering through the Envoy Router")
 	cmd.Flags().StringVar(&cfg.EnvoyCertPath, "envoy-cert-path", "", "Path to the Envoy certificate file (if empty, a self-signed cert will be generated for testing)")
+	cmd.Flags().BoolVar(&cfg.ParkingEnabled, "parking-enabled", defaultParkingEnabled, "Park (hold and retry) requests whose actor cannot be served immediately due to transient worker-pool saturation, instead of failing fast")
+	cmd.Flags().DurationVar(&cfg.ParkingMaxWait, "parking-max-wait", defaultParkingMaxWait, "Maximum time a request may be parked waiting for its actor to become routable")
+	cmd.Flags().IntVar(&cfg.ParkingMaxParked, "parking-max-parked", defaultParkingMaxParked, "Maximum number of requests that may be parked simultaneously; excess requests are shed with 503")
 
 	return cmd
 }
@@ -241,7 +251,16 @@ func (s *RouterServer) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to create route-duration histogram: %w", err)
 		}
-		s.extprocSrv = NewExtProcServer(s.cfg.ExtprocPort, s.apiClient, routeDuration)
+		parkMetrics, err := newParkingMetrics()
+		if err != nil {
+			return fmt.Errorf("failed to create parking metrics: %w", err)
+		}
+		parkCfg := parkingConfig{
+			enabled:   s.cfg.ParkingEnabled,
+			maxWait:   s.cfg.ParkingMaxWait,
+			maxParked: s.cfg.ParkingMaxParked,
+		}
+		s.extprocSrv = NewExtProcServer(s.cfg.ExtprocPort, s.apiClient, routeDuration, parkCfg, parkMetrics)
 	}
 	ctrl := NewController(s.k8sClient, s.clientset, s.cfg, xdsSrv, s.extprocSrv)
 
