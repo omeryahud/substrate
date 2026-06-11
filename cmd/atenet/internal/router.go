@@ -62,6 +62,9 @@ func NewRouterCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cfg.AteapiCAFile, "ateapi-ca-file", ateapiauth.DefaultServiceAccountCAFile, "PEM file with CAs trusted to verify the ateapi server cert. Required for jwt.")
 	cmd.Flags().StringVar(&cfg.AteapiServerName, "ateapi-server-name", "", "SNI / hostname expected on the ateapi server cert. Optional.")
 	cmd.Flags().StringVar(&cfg.AteapiTokenFile, "ateapi-token-file", ateapiauth.DefaultServiceAccountTokenFile, "Projected SA token file used as Bearer credential. Required for jwt.")
+	cmd.Flags().BoolVar(&cfg.ParkingEnabled, "parking-enabled", true, "Park (hold and retry) requests whose actor cannot be served immediately due to transient worker-pool saturation, instead of failing fast")
+	cmd.Flags().DurationVar(&cfg.ParkingMaxWait, "parking-max-wait", 30*time.Second, "Maximum time a request may be parked waiting for its actor to become routable")
+	cmd.Flags().IntVar(&cfg.ParkingMaxParked, "parking-max-parked", 2048, "Maximum number of requests that may be parked simultaneously; excess requests are shed with 503")
 
 	return cmd
 }
