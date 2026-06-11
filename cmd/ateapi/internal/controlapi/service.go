@@ -32,13 +32,15 @@ type Service struct {
 
 var _ ateapipb.ControlServer = (*Service)(nil)
 
-// NewService creates a service.
-func NewService(persistence store.Interface, actorTemplateLister listersv1alpha1.ActorTemplateLister, dialer *AteletDialer, kubeClient kubernetes.Interface) *Service {
+// NewService creates a service. When enablePreemption is true, resume requests
+// that hit a saturated worker pool reclaim a worker by suspending a victim actor
+// instead of failing.
+func NewService(persistence store.Interface, actorTemplateLister listersv1alpha1.ActorTemplateLister, dialer *AteletDialer, kubeClient kubernetes.Interface, enablePreemption bool) *Service {
 	s := &Service{
 		persistence:         persistence,
 		actorTemplateLister: actorTemplateLister,
 		dialer:              dialer,
-		actorWorkflow:       NewActorWorkflow(persistence, dialer, actorTemplateLister, kubeClient),
+		actorWorkflow:       NewActorWorkflow(persistence, dialer, actorTemplateLister, kubeClient, enablePreemption),
 	}
 
 	return s

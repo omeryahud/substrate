@@ -64,6 +64,8 @@ var (
 	sessionIDCAPoolFile = pflag.String("session-id-ca-pool", "", "The file that contains the CA pool for signing session JWTs")
 	workerpoolCACerts   = pflag.String("workerpool-ca-certs", "", "The file that contains the CA for verifying workerpool client certificates.")
 
+	enablePreemption = pflag.Bool("enable-preemption", true, "When a worker pool is saturated, reclaim a worker for a resume by suspending a victim actor instead of failing the request.")
+
 	showVersion = pflag.Bool("version", false, "Print version and exit.")
 )
 
@@ -131,7 +133,7 @@ func main() {
 	ateFactory.WaitForCacheSync(stopCh)
 
 	dialer := controlapi.NewAteletDialer(workerPodInformer.GetIndexer(), ateletPodInformer.GetIndexer())
-	sm := controlapi.NewService(redisPersistence, actorTemplateLister, dialer, clientset)
+	sm := controlapi.NewService(redisPersistence, actorTemplateLister, dialer, clientset, *enablePreemption)
 
 	sessionIdentitySrv := sessionidentity.New(*clientJWTIssuer, *clientJWTAudience, *sessionIDJWTPoolFile, *sessionIDCAPoolFile, *workerpoolCACerts)
 
@@ -196,6 +198,7 @@ func logFlagValues(ctx context.Context) {
 		slog.String("session-id-jwt-pool", *sessionIDJWTPoolFile),
 		slog.String("session-id-ca-pool", *sessionIDCAPoolFile),
 		slog.String("workerpool-ca-certs", *workerpoolCACerts),
+		slog.Bool("enable-preemption", *enablePreemption),
 	)
 }
 

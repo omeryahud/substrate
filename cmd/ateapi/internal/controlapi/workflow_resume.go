@@ -78,6 +78,9 @@ func (s *LoadActorForResumeStep) RetryBackoff() *wait.Backoff { return nil }
 
 type AssignWorkerStep struct {
 	store store.Interface
+	// preemptor, when non-nil, reclaims a worker by suspending a victim actor if
+	// the target pool has no free worker. Nil disables preemption.
+	preemptor *Preemptor
 }
 
 func (s *AssignWorkerStep) Name() string { return "AssignWorker" }
@@ -101,14 +104,31 @@ func (s *AssignWorkerStep) Execute(ctx context.Context, input *ResumeInput, stat
 		}
 	}
 
-	// If not, find a free one using randomized shuffling
+	// If not, find a free one using randomized shuffling.
 	if assignedWorker == nil {
-		pickedWorker := s.findFreeWorker(workers, state.ActorTemplate.Spec.WorkerPoolRef.Namespace, state.ActorTemplate.Spec.WorkerPoolRef.Name)
+		poolNamespace := state.ActorTemplate.Spec.WorkerPoolRef.Namespace
+		poolName := state.ActorTemplate.Spec.WorkerPoolRef.Name
+
+		pickedWorker := s.findFreeWorker(workers, poolNamespace, poolName)
+
+		// The pool is saturated. If preemption is enabled, reclaim a worker by
+		// suspending a victim actor and use the worker it frees up.
+		if pickedWorker == nil && s.preemptor != nil {
+			freed, err := s.preemptor.Preempt(ctx, workers, poolNamespace, poolName, input.ActorID)
+			if err != nil {
+				return fmt.Errorf("while attempting preemption: %w", err)
+			}
+			pickedWorker = freed
+		}
+
 		if pickedWorker == nil {
 			return status.Errorf(codes.FailedPrecondition, "no free workers available")
 		}
 
 		assignedWorker = pickedWorker
+		// Stamp the assignment time so the preemption policy can later identify
+		// this as a long-resident (and thus preemptible) actor.
+		assignedWorker.RunningSinceUnixNanos = time.Now().UnixNano()
 		slog.InfoContext(ctx, "Picked worker", slog.Any("worker", pickedWorker.String()))
 	}
 

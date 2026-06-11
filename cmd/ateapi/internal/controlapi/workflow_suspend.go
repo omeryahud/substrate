@@ -209,6 +209,7 @@ func (s *FinalizeSuspendedStep) Execute(ctx context.Context, input *SuspendInput
 				worker.ActorNamespace = ""
 				worker.ActorTemplate = ""
 				worker.ActorId = ""
+				worker.RunningSinceUnixNanos = 0
 
 				err = s.store.UpdateWorker(ctx, worker, worker.Version)
 				if err != nil {

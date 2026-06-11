@@ -162,6 +162,13 @@ message Worker {
   string ip              = 7;
   int64  version         = 8;
   string worker_pod_uid  = 9;
+
+  // running_since_unix_nanos is the wall-clock time (Unix nanoseconds) at which
+  // the currently-assigned actor was placed on this worker. It is zero when the
+  // worker is idle (no actor assigned). The scheduler uses it as the default
+  // preemption policy signal: when a pool is saturated, the longest-resident
+  // actor (smallest running_since_unix_nanos) is chosen as the victim.
+  int64 running_since_unix_nanos = 10;
 }
 
 message DebugClearRequest {}

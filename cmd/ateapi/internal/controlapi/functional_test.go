@@ -233,8 +233,14 @@ type testContext struct {
 	actorTemplateLister listersv1alpha1.ActorTemplateLister
 }
 
-// setupTest sets up a fully isolated test environment.
+// setupTest sets up a fully isolated test environment with preemption enabled.
 func setupTest(t *testing.T, ns string) *testContext {
+	return setupTestWithPreemption(t, ns, true)
+}
+
+// setupTestWithPreemption sets up a fully isolated test environment, controlling
+// whether the scheduler is allowed to preempt victim actors under saturation.
+func setupTestWithPreemption(t *testing.T, ns string, enablePreemption bool) *testContext {
 	t.Helper()
 	// 1. Start Miniredis
 	mr, err := miniredis.Run()
@@ -282,7 +288,7 @@ func setupTest(t *testing.T, ns string) *testContext {
 
 	// 4. Initialize Service
 	dialer := NewAteletDialer(workerInformer.GetIndexer(), ateletInformer.GetIndexer())
-	service := NewService(persistence, actorTemplateLister, dialer, k8sClient)
+	service := NewService(persistence, actorTemplateLister, dialer, k8sClient, enablePreemption)
 
 	// 5. Start REAL gRPC Server for ATE API
 	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(ateinterceptors.ServerUnaryInterceptor))
@@ -870,7 +876,7 @@ func TestResumeActor(t *testing.T) {
 		Ip:              "127.0.0.1",
 	}
 
-	if diff := cmp.Diff(wantWorker, actorWorker, protocmp.Transform(), protocmp.IgnoreFields(&ateapipb.Worker{}, "version"), protocmp.IgnoreFields(&ateapipb.Worker{}, "worker_pod_uid")); diff != "" {
+	if diff := cmp.Diff(wantWorker, actorWorker, protocmp.Transform(), protocmp.IgnoreFields(&ateapipb.Worker{}, "version"), protocmp.IgnoreFields(&ateapipb.Worker{}, "worker_pod_uid"), protocmp.IgnoreFields(&ateapipb.Worker{}, "running_since_unix_nanos")); diff != "" {
 		t.Errorf("Worker state mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -986,6 +992,144 @@ func TestResumeActor_NoWorkers(t *testing.T) {
 		ActorId: id,
 	})
 	assertGrpcError(t, err, codes.FailedPrecondition, "no free workers available")
+}
+
+// TestResumeActor_Preemption tests that a resume hitting a saturated pool evicts
+// a victim actor and reuses the freed worker.
+// Workflow:
+//  1. Creates a template and exactly one worker, so the pool saturates after one resume.
+//  2. Resumes a "victim" actor onto the only worker.
+//  3. Resumes a "requester" actor. With no free worker, the scheduler must
+//     suspend (checkpoint) the victim and assign the freed worker to the requester.
+//  4. Verifies the victim was checkpointed and is now SUSPENDED off its worker
+//     (with a snapshot), and the requester is RUNNING on that worker.
+func TestResumeActor_Preemption(t *testing.T) {
+	ns := namespaceForTest("ns-resume-preempt")
+	tc := setupTest(t, ns)
+	defer tc.cleanup()
+
+	createTemplate(t, tc, ns)
+
+	// Exactly one worker -> the pool saturates after a single resume.
+	createWorkerPod(t, tc, ns, "worker-1", "node1")
+
+	// Victim actor takes the only worker.
+	_, err := tc.client.CreateActor(context.Background(), &ateapipb.CreateActorRequest{
+		ActorTemplateNamespace: ns,
+		ActorTemplateName:      "tmpl1",
+		ActorId:                "victim",
+	})
+	if err != nil {
+		t.Fatalf("CreateActor(victim) failed: %v", err)
+	}
+	if _, err := tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{ActorId: "victim"}); err != nil {
+		t.Fatalf("ResumeActor(victim) failed: %v", err)
+	}
+
+	// Reset atelet call flags so we can attribute the next calls to preemption.
+	tc.fakeAtelet.Lock.Lock()
+	tc.fakeAtelet.CheckpointCalled = false
+	tc.fakeAtelet.RestoreCalled = false
+	tc.fakeAtelet.Lock.Unlock()
+
+	// Requesting actor arrives at a saturated pool; preemption must evict victim.
+	_, err = tc.client.CreateActor(context.Background(), &ateapipb.CreateActorRequest{
+		ActorTemplateNamespace: ns,
+		ActorTemplateName:      "tmpl1",
+		ActorId:                "requester",
+	})
+	if err != nil {
+		t.Fatalf("CreateActor(requester) failed: %v", err)
+	}
+	if _, err := tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{ActorId: "requester"}); err != nil {
+		t.Fatalf("ResumeActor(requester) failed (preemption should have freed a worker): %v", err)
+	}
+
+	// The victim should have been checkpointed and the requester restored.
+	tc.fakeAtelet.Lock.Lock()
+	checkpointCalled := tc.fakeAtelet.CheckpointCalled
+	restoreCalled := tc.fakeAtelet.RestoreCalled
+	tc.fakeAtelet.Lock.Unlock()
+	if !checkpointCalled {
+		t.Error("expected victim to be checkpointed (Checkpoint not called)")
+	}
+	if !restoreCalled {
+		t.Error("expected requester to be restored (Restore not called)")
+	}
+
+	// Requester is RUNNING on worker-1.
+	requester, err := tc.persistence.GetActor(context.Background(), "requester")
+	if err != nil {
+		t.Fatalf("GetActor(requester): %v", err)
+	}
+	if requester.GetStatus() != ateapipb.Actor_STATUS_RUNNING {
+		t.Errorf("expected requester RUNNING, got %v", requester.GetStatus())
+	}
+	if requester.GetAteomPodName() != "worker-1" {
+		t.Errorf("expected requester on worker-1, got %q", requester.GetAteomPodName())
+	}
+
+	// Victim is SUSPENDED, off its worker, with a snapshot to resume from later.
+	victim, err := tc.persistence.GetActor(context.Background(), "victim")
+	if err != nil {
+		t.Fatalf("GetActor(victim): %v", err)
+	}
+	if victim.GetStatus() != ateapipb.Actor_STATUS_SUSPENDED {
+		t.Errorf("expected victim SUSPENDED, got %v", victim.GetStatus())
+	}
+	if victim.GetAteomPodNamespace() != "" {
+		t.Errorf("expected victim to be off its worker, still points at %q", victim.GetAteomPodNamespace())
+	}
+	if victim.GetLastSnapshot() == "" {
+		t.Error("expected victim to have a LastSnapshot after preemptive suspend")
+	}
+
+	// Worker-1 now hosts the requester.
+	worker, err := tc.persistence.GetWorker(context.Background(), ns, "pool1", "worker-1")
+	if err != nil {
+		t.Fatalf("GetWorker(worker-1): %v", err)
+	}
+	if worker.GetActorId() != "requester" {
+		t.Errorf("expected worker-1 to host requester, got %q", worker.GetActorId())
+	}
+}
+
+// TestResumeActor_PreemptionDisabled verifies the --enable-preemption=false
+// off-switch: a saturated pool rejects the resume and the incumbent is untouched.
+func TestResumeActor_PreemptionDisabled(t *testing.T) {
+	ns := namespaceForTest("ns-resume-preempt-off")
+	tc := setupTestWithPreemption(t, ns, false)
+	defer tc.cleanup()
+
+	createTemplate(t, tc, ns)
+	createWorkerPod(t, tc, ns, "worker-1", "node1")
+
+	for _, id := range []string{"victim", "requester"} {
+		if _, err := tc.client.CreateActor(context.Background(), &ateapipb.CreateActorRequest{
+			ActorTemplateNamespace: ns,
+			ActorTemplateName:      "tmpl1",
+			ActorId:                id,
+		}); err != nil {
+			t.Fatalf("CreateActor(%s) failed: %v", id, err)
+		}
+	}
+
+	if _, err := tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{ActorId: "victim"}); err != nil {
+		t.Fatalf("ResumeActor(victim) failed: %v", err)
+	}
+
+	// With preemption disabled, the saturated pool must reject the requester.
+	_, err := tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{ActorId: "requester"})
+	assertGrpcError(t, err, codes.FailedPrecondition, "no free workers available")
+
+	// Victim remains RUNNING; it was never evicted.
+	victim, err := tc.persistence.GetActor(context.Background(), "victim")
+	if err != nil {
+		t.Fatalf("GetActor(victim): %v", err)
+	}
+	if victim.GetStatus() != ateapipb.Actor_STATUS_RUNNING {
+		t.Errorf("expected victim to remain RUNNING, got %v", victim.GetStatus())
+	}
 }
 
 // TestResumeActor_Reentrancy tests the failure recovery and re-entrancy of ResumeActor.

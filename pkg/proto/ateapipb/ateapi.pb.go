@@ -883,8 +883,14 @@ type Worker struct {
 	Ip              string                 `protobuf:"bytes,7,opt,name=ip,proto3" json:"ip,omitempty"`
 	Version         int64                  `protobuf:"varint,8,opt,name=version,proto3" json:"version,omitempty"`
 	WorkerPodUid    string                 `protobuf:"bytes,9,opt,name=worker_pod_uid,json=workerPodUid,proto3" json:"worker_pod_uid,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// running_since_unix_nanos is the wall-clock time (Unix nanoseconds) at which
+	// the currently-assigned actor was placed on this worker. It is zero when the
+	// worker is idle (no actor assigned). The scheduler uses it as the default
+	// preemption policy signal: when a pool is saturated, the longest-resident
+	// actor (smallest running_since_unix_nanos) is chosen as the victim.
+	RunningSinceUnixNanos int64 `protobuf:"varint,10,opt,name=running_since_unix_nanos,json=runningSinceUnixNanos,proto3" json:"running_since_unix_nanos,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *Worker) Reset() {
@@ -978,6 +984,13 @@ func (x *Worker) GetWorkerPodUid() string {
 		return x.WorkerPodUid
 	}
 	return ""
+}
+
+func (x *Worker) GetRunningSinceUnixNanos() int64 {
+	if x != nil {
+		return x.RunningSinceUnixNanos
+	}
+	return 0
 }
 
 type DebugClearRequest struct {
@@ -1358,7 +1371,7 @@ const file_ateapi_proto_rawDesc = "" +
 	"page_token\x18\x02 \x01(\tR\tpageToken\"c\n" +
 	"\x12ListActorsResponse\x12%\n" +
 	"\x06actors\x18\x01 \x03(\v2\r.ateapi.ActorR\x06actors\x12&\n" +
-	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\xae\x02\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"\xe7\x02\n" +
 	"\x06Worker\x12)\n" +
 	"\x10worker_namespace\x18\x01 \x01(\tR\x0fworkerNamespace\x12\x1f\n" +
 	"\vworker_pool\x18\x02 \x01(\tR\n" +
@@ -1370,7 +1383,9 @@ const file_ateapi_proto_rawDesc = "" +
 	"\bactor_id\x18\x06 \x01(\tR\aactorId\x12\x0e\n" +
 	"\x02ip\x18\a \x01(\tR\x02ip\x12\x18\n" +
 	"\aversion\x18\b \x01(\x03R\aversion\x12$\n" +
-	"\x0eworker_pod_uid\x18\t \x01(\tR\fworkerPodUid\"\x13\n" +
+	"\x0eworker_pod_uid\x18\t \x01(\tR\fworkerPodUid\x127\n" +
+	"\x18running_since_unix_nanos\x18\n" +
+	" \x01(\x03R\x15runningSinceUnixNanos\"\x13\n" +
 	"\x11DebugClearRequest\"\x14\n" +
 	"\x12DebugClearResponse\"{\n" +
 	"\x0eMintJWTRequest\x12\x1a\n" +

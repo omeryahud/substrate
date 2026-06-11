@@ -119,17 +119,28 @@ type ActorWorkflow struct {
 	actorTemplateLister listersv1alpha1.ActorTemplateLister
 	kubeClient          kubernetes.Interface
 	secretCache         *envSecretCache
+	// preemptor is non-nil when preemption is enabled. It suspends victim actors
+	// to free workers for resume requests that hit a saturated pool.
+	preemptor *Preemptor
 }
 
-// NewActorWorkflow creates a new ActorWorkflow.
-func NewActorWorkflow(store store.Interface, dialer *AteletDialer, actorTemplateLister listersv1alpha1.ActorTemplateLister, kubeClient kubernetes.Interface) *ActorWorkflow {
-	return &ActorWorkflow{
+// NewActorWorkflow creates a new ActorWorkflow. When enablePreemption is true,
+// a saturated worker pool no longer fails a resume outright: the scheduler
+// suspends a victim actor to reclaim a worker for the incoming actor.
+func NewActorWorkflow(store store.Interface, dialer *AteletDialer, actorTemplateLister listersv1alpha1.ActorTemplateLister, kubeClient kubernetes.Interface, enablePreemption bool) *ActorWorkflow {
+	w := &ActorWorkflow{
 		store:               store,
 		dialer:              dialer,
 		actorTemplateLister: actorTemplateLister,
 		kubeClient:          kubeClient,
 		secretCache:         newEnvSecretCache(envSecretCacheTTL),
 	}
+	if enablePreemption {
+		// The Preemptor frees workers by running the standard suspend workflow
+		// against the victim, so it suspends via this same ActorWorkflow.
+		w.preemptor = NewPreemptor(store, w)
+	}
+	return w
 }
 
 // ResumeActor executes the workflow to resume a suspended actor. Idempotent.
@@ -150,7 +161,7 @@ func (w *ActorWorkflow) ResumeActor(ctx context.Context, id string, boot bool) (
 
 	steps := []WorkflowStep[*ResumeInput, *ResumeState]{
 		&LoadActorForResumeStep{store: w.store, actorTemplateLister: w.actorTemplateLister},
-		&AssignWorkerStep{store: w.store},
+		&AssignWorkerStep{store: w.store, preemptor: w.preemptor},
 		&CallAteletRestoreStep{dialer: w.dialer, kubeClient: w.kubeClient, secretCache: w.secretCache},
 		&FinalizeRunningStep{store: w.store},
 	}

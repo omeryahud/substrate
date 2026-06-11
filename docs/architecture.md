@@ -272,7 +272,10 @@ manage actor lifecycles.
   * **State Store**: Tracks the mapping of Actors to Workers in a
     high-performance Redis store.
 
-  * **Scheduler**: Selects a ready worker for a resumption request.
+  * **Scheduler**: Selects a ready worker for a resumption request. When a pool
+    is saturated, it can *preempt* a victim actor — suspending it to reclaim its
+    worker — so the incoming actor can still be admitted. See
+    [Worker Preemption](preemption.md).
 
   * **Workflow Engine**: Orchestrates the multi-step Resume/Suspend sequences
     (lock acquisition, storage download, sandbox restore).
@@ -324,7 +327,9 @@ Triggered by an inbound request at the Gateway or an explicit API call.
      the actor's location.
 
   2. **Assignment**: The Control Plane claims a warm worker from the
-     `WorkerPool`.
+     `WorkerPool`. If every worker is occupied, it preempts a victim actor
+     (checkpointing it first, so no state is lost) to reclaim a worker. See
+     [Worker Preemption](preemption.md).
 
   3. **Hydration**: The `atelet` supervisor coordinates with the `ateom` process inside the worker pod to restore the `GoldenSnapshot` (for first-run) or the `LastSnapshot` (for recurring runs) into the sandbox.
 
