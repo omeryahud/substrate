@@ -162,7 +162,7 @@ func (s *ExtProcServer) handleRequestHeaders(
 
 	slog.InfoContext(ctx, "ResumeActor", slog.String("atespace", atespace), slog.String("actor", actorName))
 	actor, err := s.resumer.ResumeActor(ctx, atespace, actorName)
-	release(parkOutcome(err))
+	release(parkOutcomeFor(err))
 
 	if err != nil {
 		return nil, metadata, "", "", "", mapResumeError(actorName, err)
