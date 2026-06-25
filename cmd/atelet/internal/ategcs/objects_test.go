@@ -463,3 +463,46 @@ func TestWriteDecodeContentRoundTrip(t *testing.T) {
 		}
 	})
 }
+
+// TestCopyZstdSparseClearsStaleData exercises the defensive dst.Truncate(0): a dst
+// that already holds bytes — here larger than and different from the new content —
+// must come out byte-exact, with the would-be holes reading back as zero (not the
+// stale bytes) and the file shrunk to the new logical size.
+func TestCopyZstdSparseClearsStaleData(t *testing.T) {
+	const size = 2 << 20
+	want := make([]byte, size)
+	for i := 0; i < 4096; i++ { // first page
+		want[i] = byte(i%251 + 1)
+	}
+	for i := 1 << 20; i < (1<<20)+4096; i++ { // an interior page, rest stays a hole
+		want[i] = byte(i%253 + 1)
+	}
+
+	out := filepath.Join(t.TempDir(), "dst")
+	f, err := os.Create(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	// Pre-fill with stale non-zero bytes, larger than the new content, so the test
+	// also covers shrinking to the exact logical size.
+	stale := make([]byte, size+size/2)
+	for i := range stale {
+		stale[i] = 0xFF
+	}
+	if _, err := f.Write(stale); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := copyZstdSparse(f, bytes.NewReader(want)); err != nil {
+		t.Fatalf("copyZstdSparse: %v", err)
+	}
+
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("stale data not cleared / wrong size: len(got)=%d len(want)=%d", len(got), len(want))
+	}
+}
