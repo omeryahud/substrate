@@ -27,10 +27,11 @@ demo driver creates an atespace (`demo-autoscaling` by default, override with
 
 ```yaml
 spec:
-  replicas: 2        # starting point; the autoscaler owns it from here
-  minReady: 2        # reservation floor — never scale below 2 warm workers
-  targetBuffer: 2    # keep ~2 idle workers ready to absorb a burst
-  maxReplicas: 8     # ceiling
+  replicas: 2          # starting point; the autoscaler owns it from here
+  autoscaling:         # presence of this block enables autoscaling
+    minReady: 2        # reservation floor — never scale below 2 warm workers
+    targetBuffer: 2    # keep ~2 idle workers ready to absorb a burst
+    maxReplicas: 8     # ceiling
 ```
 
 ## Prerequisites

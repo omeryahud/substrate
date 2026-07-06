@@ -22,19 +22,16 @@ package autoscaler
 
 import "time"
 
-// Bounds are the declarative autoscaling inputs from WorkerPoolSpec. A nil
-// pointer means the operator left the field unset.
+// Bounds are the declarative autoscaling inputs from WorkerPoolSpec.Autoscaling.
+// A nil pointer means the operator left the field unset. Whether autoscaling is
+// enabled at all is not Bounds' concern: the spec's Autoscaling struct being
+// present is what enables it (the reconciler checks that before calling Step),
+// so an all-nil Bounds is a valid, enabled configuration that simply holds the
+// pool steady.
 type Bounds struct {
 	MinReady     *int32
 	TargetBuffer *int32
 	MaxReplicas  *int32
-}
-
-// Enabled reports whether autoscaling is configured for the pool. With neither
-// minReady nor targetBuffer set, the autoscaler leaves the pool alone — replicas
-// stay whatever a human (or some other tool) set on the scale subresource.
-func (b Bounds) Enabled() bool {
-	return b.MinReady != nil || b.TargetBuffer != nil
 }
 
 // Observation is the measured live state of a pool at decision time.

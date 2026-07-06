@@ -110,7 +110,7 @@ func poolWorkers(ns, pool string, total, occupied int) []*ateapipb.Worker {
 
 func TestAutoscalerScalesUpToRefillBuffer(t *testing.T) {
 	wp := makeWorkerPool("autoscale-up", "default", 5, "ateom:v1")
-	wp.Spec.TargetBuffer = ptrInt32(3)
+	wp.Spec.Autoscaling = &atev1alpha1.WorkerPoolAutoscaling{TargetBuffer: ptrInt32(3)}
 	if err := k8sClient.Create(testCtx, wp); err != nil {
 		t.Fatalf("create WorkerPool: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestAutoscalerScalesUpToRefillBuffer(t *testing.T) {
 }
 
 func TestAutoscalerSkipsUnconfiguredPool(t *testing.T) {
-	wp := makeWorkerPool("autoscale-skip", "default", 4, "ateom:v1") // no autoscaling fields
+	wp := makeWorkerPool("autoscale-skip", "default", 4, "ateom:v1") // no spec.autoscaling
 	if err := k8sClient.Create(testCtx, wp); err != nil {
 		t.Fatalf("create WorkerPool: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestAutoscalerSkipsUnconfiguredPool(t *testing.T) {
 
 func TestAutoscalerScaleDownAfterStabilization(t *testing.T) {
 	wp := makeWorkerPool("autoscale-down", "default", 10, "ateom:v1")
-	wp.Spec.TargetBuffer = ptrInt32(2)
+	wp.Spec.Autoscaling = &atev1alpha1.WorkerPoolAutoscaling{TargetBuffer: ptrInt32(2)}
 	if err := k8sClient.Create(testCtx, wp); err != nil {
 		t.Fatalf("create WorkerPool: %v", err)
 	}

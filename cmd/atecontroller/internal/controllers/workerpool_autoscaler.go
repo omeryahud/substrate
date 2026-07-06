@@ -97,16 +97,16 @@ func (r *WorkerPoolAutoscaler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	bounds := autoscaler.Bounds{
-		MinReady:     wp.Spec.MinReady,
-		TargetBuffer: wp.Spec.TargetBuffer,
-		MaxReplicas:  wp.Spec.MaxReplicas,
-	}
-	if !bounds.Enabled() {
+	if wp.Spec.Autoscaling == nil {
 		// Pool is not autoscaled: leave spec.replicas to whoever owns it and stop
 		// requeuing it.
 		r.forget(req.NamespacedName)
 		return ctrl.Result{}, nil
+	}
+	bounds := autoscaler.Bounds{
+		MinReady:     wp.Spec.Autoscaling.MinReady,
+		TargetBuffer: wp.Spec.Autoscaling.TargetBuffer,
+		MaxReplicas:  wp.Spec.Autoscaling.MaxReplicas,
 	}
 
 	obs, err := r.observe(ctx, wp)

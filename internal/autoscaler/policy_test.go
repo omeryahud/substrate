@@ -23,23 +23,6 @@ func p(v int32) *int32 { return &v }
 
 var base = time.Unix(1_700_000_000, 0)
 
-func TestBoundsEnabled(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		b    Bounds
-		want bool
-	}{
-		{"none", Bounds{}, false},
-		{"maxOnly", Bounds{MaxReplicas: p(5)}, false},
-		{"minReady", Bounds{MinReady: p(1)}, true},
-		{"targetBuffer", Bounds{TargetBuffer: p(2)}, true},
-	} {
-		if got := tc.b.Enabled(); got != tc.want {
-			t.Errorf("%s: Enabled()=%v want %v", tc.name, got, tc.want)
-		}
-	}
-}
-
 func TestStep(t *testing.T) {
 	const stab = 30 * time.Second
 	for _, tc := range []struct {
@@ -140,7 +123,7 @@ func TestStep(t *testing.T) {
 			wantTarget: 5, wantChanged: true,
 		},
 		{
-			name:       "no autoscaling fields: steady no-op",
+			name:       "empty bounds (autoscaling on, no fields): steady no-op",
 			b:          Bounds{},
 			o:          Observation{Current: 4},
 			now:        base,

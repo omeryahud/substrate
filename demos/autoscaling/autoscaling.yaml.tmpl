@@ -33,13 +33,15 @@ spec:
   replicas: 2
   ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
 
-  # --- Autoscaling bounds (the feature this demo exercises, issue #198) ---
-  # Never scale below 2 warm workers (the reservation floor).
-  minReady: 2
-  # Keep ~2 idle (warm) workers ready to absorb a resume burst.
-  targetBuffer: 2
-  # Ceiling the autoscaler may grow to.
-  maxReplicas: 8
+  # --- Autoscaling (the feature this demo exercises, issue #198) ---
+  # Presence of this block is what enables autoscaling for the pool.
+  autoscaling:
+    # Never scale below 2 warm workers (the reservation floor).
+    minReady: 2
+    # Keep ~2 idle (warm) workers ready to absorb a resume burst.
+    targetBuffer: 2
+    # Ceiling the autoscaler may grow to.
+    maxReplicas: 8
 
 ---
 
