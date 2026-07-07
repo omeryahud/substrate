@@ -80,6 +80,27 @@ type WorkerPoolAutoscaling struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	MaxReplicas *int32 `json:"maxReplicas,omitempty"`
+
+	// ScaleDownStabilization is how long a scale-down must be continuously
+	// warranted before it is applied. Shrinking is deliberately slower than
+	// growing: removing a warm worker that a burst will want back seconds later
+	// costs a cold start, so the pool only shrinks after the surplus has held
+	// for this whole window, and any tick that no longer wants the shrink
+	// restarts it. Scale-up is never delayed by this setting. "0s" applies
+	// scale-downs immediately. When unset, the autoscaler's cluster-wide
+	// default (60s) is used.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s')",message="scaleDownStabilization must not be negative"
+	ScaleDownStabilization *metav1.Duration `json:"scaleDownStabilization,omitempty"`
+
+	// MaxScaleUpStep caps how many replicas a single scale-up may add on top of
+	// the current count, smoothing bursts of demand into stepwise growth. The
+	// reservation floor is exempt: a pool below MinReady is always raised to it
+	// in one step regardless of this cap. When unset, scale-ups are uncapped
+	// and jump straight to the computed target (the cluster-wide default).
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	MaxScaleUpStep *int32 `json:"maxScaleUpStep,omitempty"`
 }
 
 type WorkerPoolSpec struct {

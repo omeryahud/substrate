@@ -58,7 +58,9 @@ type WorkerPoolAutoscaler struct {
 
 	// AteClient is the control-plane API used to read per-pool worker occupancy.
 	AteClient ateapipb.ControlClient
-	// Config tunes the decision policy (stabilization window, max up-step).
+	// Config holds the cluster-wide defaults for the decision policy
+	// (stabilization window, max up-step). A pool overrides them per-field via
+	// spec.autoscaling; see effectiveConfig.
 	Config autoscaler.Config
 	// Interval is the re-evaluation cadence. Defaults to defaultAutoscaleInterval.
 	Interval time.Duration
@@ -114,7 +116,7 @@ func (r *WorkerPoolAutoscaler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, fmt.Errorf("while observing pool occupancy: %w", err)
 	}
 
-	decision, downSince := autoscaler.Step(bounds, obs, r.Config, r.nowFn(), r.loadDownSince(req.NamespacedName))
+	decision, downSince := autoscaler.Step(bounds, obs, r.effectiveConfig(wp.Spec.Autoscaling), r.nowFn(), r.loadDownSince(req.NamespacedName))
 	r.storeDownSince(req.NamespacedName, downSince)
 
 	if decision.Changed {
@@ -162,6 +164,20 @@ func (r *WorkerPoolAutoscaler) scaleTo(ctx context.Context, wp *atev1alpha1.Work
 	patch := client.MergeFrom(wp.DeepCopy())
 	wp.Spec.Replicas = target
 	return r.Patch(ctx, wp, patch)
+}
+
+// effectiveConfig returns the decision-policy config for one pool: the
+// autoscaler's cluster-wide defaults with any per-pool overrides from
+// spec.autoscaling applied on top.
+func (r *WorkerPoolAutoscaler) effectiveConfig(a *atev1alpha1.WorkerPoolAutoscaling) autoscaler.Config {
+	cfg := r.Config
+	if a.ScaleDownStabilization != nil {
+		cfg.ScaleDownStabilization = a.ScaleDownStabilization.Duration
+	}
+	if a.MaxScaleUpStep != nil {
+		cfg.MaxScaleUpStep = *a.MaxScaleUpStep
+	}
+	return cfg
 }
 
 func (r *WorkerPoolAutoscaler) nowFn() time.Time {

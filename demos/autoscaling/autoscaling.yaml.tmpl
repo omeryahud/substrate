@@ -42,6 +42,10 @@ spec:
     targetBuffer: 2
     # Ceiling the autoscaler may grow to.
     maxReplicas: 8
+    # Hold scale-downs until the surplus has lasted this long (matches the
+    # cluster default; shown here as the per-pool knob). Scale-up is never
+    # delayed — omit maxScaleUpStep to keep it uncapped.
+    scaleDownStabilization: 60s
 
 ---
 

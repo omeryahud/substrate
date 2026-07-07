@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -204,5 +205,84 @@ func TestAutoscalerScaleDownAfterStabilization(t *testing.T) {
 	}
 	if got.Spec.Replicas != 4 {
 		t.Fatalf("after tick2 replicas = %d, want 4 (applied)", got.Spec.Replicas)
+	}
+}
+
+// TestAutoscalerPerPoolMaxScaleUpStep verifies spec.autoscaling.maxScaleUpStep
+// overrides the cluster default (uncapped): a large buffer deficit grows the
+// pool by at most one replica per tick.
+func TestAutoscalerPerPoolMaxScaleUpStep(t *testing.T) {
+	wp := makeWorkerPool("autoscale-step", "default", 2, "ateom:v1")
+	wp.Spec.Autoscaling = &atev1alpha1.WorkerPoolAutoscaling{
+		TargetBuffer:   ptrInt32(3),
+		MaxScaleUpStep: ptrInt32(1),
+	}
+	if err := k8sClient.Create(testCtx, wp); err != nil {
+		t.Fatalf("create WorkerPool: %v", err)
+	}
+
+	// 2 registered, 0 free => ideal = 2 + 3 - 0 = 5, but the per-pool step cap
+	// allows only +1 per tick. The component Config carries no cap (the
+	// cluster default), so the cap in effect must be the pool's.
+	r := &WorkerPoolAutoscaler{
+		Client:    k8sClient,
+		AteClient: &stubControl{workers: poolWorkers("default", "autoscale-step", 2, 2)},
+		now:       func() time.Time { return time.Unix(1_700_000_000, 0) },
+	}
+	key := types.NamespacedName{Namespace: "default", Name: "autoscale-step"}
+	if _, err := r.Reconcile(testCtx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	got := &atev1alpha1.WorkerPool{}
+	if err := k8sClient.Get(testCtx, key, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Spec.Replicas != 3 {
+		t.Fatalf("replicas = %d, want 3 (2 + maxScaleUpStep 1, not ideal 5)", got.Spec.Replicas)
+	}
+}
+
+// TestAutoscalerPerPoolScaleDownStabilization verifies
+// spec.autoscaling.scaleDownStabilization overrides the cluster default: with
+// a 5s per-pool window and a 60s default, the shrink applies after 6s.
+func TestAutoscalerPerPoolScaleDownStabilization(t *testing.T) {
+	wp := makeWorkerPool("autoscale-fastdown", "default", 5, "ateom:v1")
+	wp.Spec.Autoscaling = &atev1alpha1.WorkerPoolAutoscaling{
+		TargetBuffer:           ptrInt32(1),
+		ScaleDownStabilization: &metav1.Duration{Duration: 5 * time.Second},
+	}
+	if err := k8sClient.Create(testCtx, wp); err != nil {
+		t.Fatalf("create WorkerPool: %v", err)
+	}
+
+	// 5 registered, 5 free => ideal = 5 + 1 - 5 = 1 (wants to shrink).
+	base := time.Unix(1_700_000_000, 0)
+	now := base
+	r := &WorkerPoolAutoscaler{
+		Client:    k8sClient,
+		AteClient: &stubControl{workers: poolWorkers("default", "autoscale-fastdown", 5, 0)},
+		Config:    autoscaler.Config{ScaleDownStabilization: 60 * time.Second}, // cluster default
+		now:       func() time.Time { return now },
+	}
+	key := types.NamespacedName{Namespace: "default", Name: "autoscale-fastdown"}
+
+	// Tick 1: shrink wanted, timer starts.
+	if _, err := r.Reconcile(testCtx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("reconcile tick1: %v", err)
+	}
+
+	// Tick 2 at +6s: inside the 60s default but past the pool's 5s window —
+	// the shrink applying proves the per-pool override is in effect.
+	now = base.Add(6 * time.Second)
+	if _, err := r.Reconcile(testCtx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("reconcile tick2: %v", err)
+	}
+	got := &atev1alpha1.WorkerPool{}
+	if err := k8sClient.Get(testCtx, key, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Spec.Replicas != 1 {
+		t.Fatalf("replicas = %d, want 1 (5s per-pool window elapsed; 60s default must not apply)", got.Spec.Replicas)
 	}
 }

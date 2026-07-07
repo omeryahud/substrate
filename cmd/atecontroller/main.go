@@ -110,7 +110,8 @@ func main() {
 		Client:    mgr.GetClient(),
 		AteClient: ateapiClient,
 		Config: autoscaler.Config{
-			// TODO: surface these as flags once we tune them in a cluster.
+			// Cluster-wide defaults; a pool overrides them per-field via
+			// spec.autoscaling (scaleDownStabilization, maxScaleUpStep).
 			ScaleDownStabilization: 60 * time.Second,
 			MaxScaleUpStep:         0, // unlimited
 		},

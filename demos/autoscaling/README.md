@@ -32,7 +32,12 @@ spec:
     minReady: 2        # reservation floor — never scale below 2 warm workers
     targetBuffer: 2    # keep ~2 idle workers ready to absorb a burst
     maxReplicas: 8     # ceiling
+    scaleDownStabilization: 60s   # hold shrinks until the surplus lasts this long
 ```
+
+Per-pool tuning is optional: `scaleDownStabilization` and `maxScaleUpStep`
+default to the autoscaler's cluster-wide settings (60s window, uncapped
+scale-up) when omitted.
 
 ## Prerequisites
 
