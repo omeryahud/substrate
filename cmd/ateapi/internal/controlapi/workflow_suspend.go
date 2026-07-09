@@ -134,7 +134,7 @@ func (s *CallAteletSuspendStep) Execute(ctx context.Context, input *SuspendInput
 	req := &ateletpb.CheckpointRequest{
 		TargetAteomUid:         state.Actor.GetAteomPodUid(),
 		Atespace:               state.Actor.GetMetadata().GetAtespace(),
-		ActorId:                state.Actor.GetMetadata().GetName(),
+		ActorName:              state.Actor.GetMetadata().GetName(),
 		ActorTemplateNamespace: state.Actor.GetActorTemplateNamespace(),
 		ActorTemplateName:      state.Actor.GetActorTemplateName(),
 		Spec:                   workloadSpec,
