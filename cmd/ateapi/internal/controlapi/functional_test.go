@@ -1061,13 +1061,12 @@ func TestListActors_PageSizeValidation(t *testing.T) {
 		t.Errorf("expected InvalidArgument error for negative page_size, got: %v", err)
 	}
 
-	// 2. Page size exceeding maxPageSize (1000)
-	_, err = tc.client.ListActors(context.Background(), &ateapipb.ListActorsRequest{
+	// 2. Page size exceeding maxPageSize (1000) is coerced silently.
+	if _, err := tc.client.ListActors(context.Background(), &ateapipb.ListActorsRequest{
 		Atespace: testAtespace,
 		PageSize: 1001,
-	})
-	if status.Code(err) != codes.InvalidArgument {
-		t.Errorf("expected InvalidArgument error for page_size > 1000, got: %v", err)
+	}); err != nil {
+		t.Errorf("expected page_size > 1000 to be coerced, got error: %v", err)
 	}
 }
 
@@ -2291,6 +2290,64 @@ func TestValidation(t *testing.T) {
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				_, err := tc.client.DeleteActor(context.Background(), tt.req)
+				assertGrpcErrorRegex(t, err, codes.InvalidArgument, tt.wantMsg)
+			})
+		}
+	})
+
+	t.Run("ListActors", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			req     *ateapipb.ListActorsRequest
+			wantMsg string
+		}{{
+			"invalid atespace",
+			&ateapipb.ListActorsRequest{Atespace: "NS1"},
+			"atespace: Invalid value",
+		}, {
+			"negative page_size",
+			&ateapipb.ListActorsRequest{Atespace: "ns1", PageSize: -1},
+			"page_size: Invalid value",
+		}}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				_, err := tc.client.ListActors(context.Background(), tt.req)
+				assertGrpcErrorRegex(t, err, codes.InvalidArgument, tt.wantMsg)
+			})
+		}
+	})
+
+	t.Run("ListWorkers", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			req     *ateapipb.ListWorkersRequest
+			wantMsg string
+		}{{
+			"negative page_size",
+			&ateapipb.ListWorkersRequest{PageSize: -1},
+			"page_size: Invalid value",
+		}}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				_, err := tc.client.ListWorkers(context.Background(), tt.req)
+				assertGrpcErrorRegex(t, err, codes.InvalidArgument, tt.wantMsg)
+			})
+		}
+	})
+
+	t.Run("ListAtespaces", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			req     *ateapipb.ListAtespacesRequest
+			wantMsg string
+		}{{
+			"negative page_size",
+			&ateapipb.ListAtespacesRequest{PageSize: -1},
+			"page_size: Invalid value",
+		}}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				_, err := tc.client.ListAtespaces(context.Background(), tt.req)
 				assertGrpcErrorRegex(t, err, codes.InvalidArgument, tt.wantMsg)
 			})
 		}
