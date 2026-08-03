@@ -191,6 +191,7 @@ We provide several sample applications demonstrating Agent Substrate's capabilit
 
 ### Documentation & Guides
 * [Architecture](docs/architecture.md): How the control plane, node supervisor, and networking stack fit together.
+* [Internals](docs/internals.md): A detailed walkthrough of how the system works — the lifecycle workflows, the request path, the snapshot machinery, and the identity system.
 * [API Configuration Guide](docs/api-guide.md): Detailed reference for configuring WorkerPools, ActorTemplates, Secrets, and Volumes.
 * [Full CLI Documentation](cmd/kubectl-ate/README.md): Installation and usage for `kubectl-ate`.
 * [Glossary](docs/glossary.md): Core terms (Actor, Atespace, ActorTemplate, WorkerPool, Worker, ate-api-server, atenet, atelet, ateom) and how they relate.
