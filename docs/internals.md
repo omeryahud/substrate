@@ -115,34 +115,36 @@ Six binaries. Three run in the control plane, three in the data plane.
 
 ```mermaid
 flowchart TB
-    subgraph CP["Control plane (ate-system)"]
+    CLIENT(("client<br/>request"))
+
+    subgraph ATE["ate-system"]
+        NET["atenet<br/>DNS + Envoy router"]
         API["ateapi<br/>lifecycle + scheduling"]
+        DB[("Valkey<br/>actor + worker records")]
         CTRL["atecontroller<br/>reconciles CRDs"]
         PCC["podcertcontroller<br/>issues pod certs"]
-        DB[("Valkey<br/>actor + worker records")]
-        API <--> DB
     end
-    subgraph DP["Data plane"]
-        NET["atenet<br/>DNS + Envoy router"]
-        subgraph Node["Each node"]
-            LET["atelet (DaemonSet)<br/>staging + blob I/O"]
-            subgraph Pod["Worker Pod"]
-                OM["ateom<br/>owns the sandbox"]
-                ACT(("actor"))
-            end
-            LET <--> OM
-            OM --> ACT
+
+    subgraph NODE["each node"]
+        LET["atelet DaemonSet<br/>staging + blob I/O"]
+        subgraph POD["worker pod"]
+            OM["ateom<br/>owns the sandbox"]
+            ACT(("actor"))
         end
     end
-    STORE[("Snapshot storage<br/>GCS / S3")]
-    K8S[("Kubernetes API")]
 
+    STORE[("snapshot storage<br/>GCS / S3")]
+
+    CLIENT --> NET
     NET -->|ResumeActor| API
+    API --- DB
     API -->|Restore / Run| LET
-    LET <--> STORE
-    CTRL --> K8S
-    API -->|reads CRDs, watches Pods| K8S
+    LET --> OM
+    OM --> ACT
     NET -->|mTLS tunnel| OM
+    LET --- STORE
+    CTRL -.creates.-> POD
+    PCC -.issues certs.-> POD
 ```
 
 **`ateapi`** — the control plane. Owns the actor lifecycle, assigns actors to
@@ -685,14 +687,15 @@ sequenceDiagram
     D-->>C: atenet-router ClusterIP
     C->>E: GET / (Host: my-actor.demo.actors…)
     E->>R: ext_proc RequestHeaders
-    R->>R: parse actor from Host; enter parking lot
+    R->>R: parse actor from Host, enter parking lot
     R->>A: ResumeActor(demo/my-actor)
     A->>L: Restore (mTLS)
     L->>L: pull snapshot, decompress, stage
     L->>T: RestoreWorkload
     T-->>L: ready
+    L-->>A: restored
     A-->>R: worker pod IP
-    R-->>E: set x-ate-original-dst: <ip>:443
+    R-->>E: set x-ate-original-dst: worker-ip:443
     E->>T: mTLS to worker :443 (ORIGINAL_DST)
     T->>T: check Host matches active actor
     T-->>E: proxied response
