@@ -115,36 +115,38 @@ Six binaries. Three run in the control plane, three in the data plane.
 
 ```mermaid
 flowchart TB
-    CLIENT(("client<br/>request"))
+    CLIENT(("client"))
 
     subgraph ATE["ate-system"]
-        NET["atenet<br/>DNS + Envoy router"]
-        API["ateapi<br/>lifecycle + scheduling"]
-        DB[("Valkey<br/>actor + worker records")]
+        direction TB
+        NET["atenet<br/>DNS + router"]
+        API["ateapi<br/>scheduling"]
+        DB[("Valkey")]
         CTRL["atecontroller<br/>reconciles CRDs"]
-        PCC["podcertcontroller<br/>issues pod certs"]
+        PCC["podcertcontroller<br/>issues certs"]
+        API --- DB
+        CTRL ~~~ PCC
     end
 
     subgraph NODE["each node"]
-        LET["atelet DaemonSet<br/>staging + blob I/O"]
+        direction TB
+        LET["atelet<br/>staging + blobs"]
         subgraph POD["worker pod"]
-            OM["ateom<br/>owns the sandbox"]
+            direction TB
+            OM["ateom"]
             ACT(("actor"))
         end
+        LET --> OM
+        OM --> ACT
     end
 
-    STORE[("snapshot storage<br/>GCS / S3")]
+    STORE[("snapshots<br/>GCS / S3")]
 
     CLIENT --> NET
     NET -->|ResumeActor| API
-    API --- DB
     API -->|Restore / Run| LET
-    LET --> OM
-    OM --> ACT
-    NET -->|mTLS tunnel| OM
+    NET -->|mTLS| OM
     LET --- STORE
-    CTRL -.creates.-> POD
-    PCC -.issues certs.-> POD
 ```
 
 **`ateapi`** — the control plane. Owns the actor lifecycle, assigns actors to
@@ -671,34 +673,34 @@ promoted into a real `ActorSnapshot`.
 ## 7. The request path
 
 This is the path the whole system exists to make fast. Everything below happens
-while the client's HTTP request is held open.
+while the client's HTTP request is held open. DNS resolution is cached with a
+60-second TTL and is not usually on this path, so the diagram picks up after it —
+step 1 below covers it.
 
 ```mermaid
+%%{init: {"sequence": {"actorMargin": 28, "width": 92, "boxMargin": 6, "messageFontSize": 12}}}%%
 sequenceDiagram
     participant C as Client
-    participant D as CoreDNS
     participant E as Envoy
-    participant R as router (ext_proc)
+    participant R as router
     participant A as ateapi
     participant L as atelet
-    participant T as ateom / atunnel
+    participant O as ateom
 
-    C->>D: resolve my-actor.demo.actors…
-    D-->>C: atenet-router ClusterIP
-    C->>E: GET / (Host: my-actor.demo.actors…)
-    E->>R: ext_proc RequestHeaders
-    R->>R: parse actor from Host, enter parking lot
-    R->>A: ResumeActor(demo/my-actor)
-    A->>L: Restore (mTLS)
-    L->>L: pull snapshot, decompress, stage
-    L->>T: RestoreWorkload
-    T-->>L: ready
+    C->>E: GET / (Host header)
+    E->>R: ext_proc headers
+    R->>R: parse actor, park
+    R->>A: ResumeActor
+    A->>L: Restore
+    L->>L: stage snapshot
+    L->>O: RestoreWorkload
+    O-->>L: ready
     L-->>A: restored
-    A-->>R: worker pod IP
-    R-->>E: set x-ate-original-dst: worker-ip:443
-    E->>T: mTLS to worker :443 (ORIGINAL_DST)
-    T->>T: check Host matches active actor
-    T-->>E: proxied response
+    A-->>R: worker IP
+    R-->>E: x-ate-original-dst
+    E->>O: mTLS :443
+    O->>O: check Host
+    O-->>E: response
     E-->>C: response
 ```
 
