@@ -81,21 +81,43 @@ func TestRouterConfigValidate(t *testing.T) {
 			wantErr: `--mode must be one of`,
 		},
 		{
-			name:    "drain-timeout below the parking budget rejected",
+			name:    "drain-timeout below the worst-case resume hold rejected",
 			cfg:     routerConfig{ParkedRequest: ingress.ParkedRequestConfig{Budget: 5 * time.Second, Max: 1024}, DrainTimeout: 2 * time.Second},
-			wantErr: "must be >= --parked-request-budget",
+			wantErr: "must be >= the worst-case resume hold",
 		},
 		{
-			name: "drain-timeout equal to the parking budget accepted",
-			cfg:  routerConfig{ParkedRequest: ingress.ParkedRequestConfig{Budget: 5 * time.Second, Max: 1024}, DrainTimeout: 5 * time.Second},
+			// The budget alone no longer covers the hold: a caller may wait a
+			// further committed-attempt wait for a resume in flight at the
+			// budget, and a drain equal to just the budget would cut it there.
+			name:    "drain-timeout equal to the budget alone rejected",
+			cfg:     routerConfig{ParkedRequest: ingress.ParkedRequestConfig{Budget: 5 * time.Second, Max: 1024}, DrainTimeout: 5 * time.Second},
+			wantErr: "must be >= the worst-case resume hold",
 		},
 		{
-			name: "drain-timeout above the parking budget accepted",
+			name: "drain-timeout equal to the worst-case resume hold accepted",
+			cfg: routerConfig{
+				ParkedRequest: ingress.ParkedRequestConfig{Budget: 5 * time.Second, Max: 1024},
+				DrainTimeout:  ingress.ParkedRequestConfig{Budget: 5 * time.Second, Max: 1024}.MaxResumeHold(),
+			},
+		},
+		{
+			name: "drain-timeout above the worst-case resume hold accepted",
 			cfg:  routerConfig{ParkedRequest: ingress.ParkedRequestConfig{Budget: 5 * time.Second, Max: 1024}, DrainTimeout: 30 * time.Second},
 		},
 		{
-			name: "short drain-timeout with parking disabled accepted",
-			cfg:  routerConfig{ParkedRequest: ingress.ParkedRequestConfig{Max: 0}, DrainTimeout: time.Second},
+			// The floor is mode-aware: with parking disabled the fail-fast
+			// hold (15s + the committed-attempt wait) is the LONGER one, and a
+			// short explicit drain would cut exactly the requests it protects.
+			name:    "short drain-timeout with parking disabled rejected",
+			cfg:     routerConfig{ParkedRequest: ingress.ParkedRequestConfig{Max: 0}, DrainTimeout: time.Second},
+			wantErr: "must be >= the worst-case resume hold",
+		},
+		{
+			name: "drain-timeout covering the fail-fast hold accepted with parking disabled",
+			cfg: routerConfig{
+				ParkedRequest: ingress.ParkedRequestConfig{Max: 0},
+				DrainTimeout:  ingress.ParkedRequestConfig{Max: 0}.MaxResumeHold(),
+			},
 		},
 		{
 			name:    "negative drain-timeout rejected",
@@ -197,25 +219,26 @@ func TestRouterConfigDrainTimeout(t *testing.T) {
 		want    time.Duration
 	}{
 		{
-			name:    "auto derives budget + route timeout + margin",
+			name:    "auto derives worst-case resume hold + route timeout + margin",
 			cfg:     routerConfig{DrainTimeout: 0},
 			parkCfg: ingress.ParkedRequestConfig{Budget: 5 * time.Second, Max: 1024}.Normalized(),
-			want:    5*time.Second + defaultRouteTimeout + drainTimeoutMargin,
+			want:    ingress.ParkedRequestConfig{Budget: 5 * time.Second, Max: 1024}.MaxResumeHold() + defaultRouteTimeout + drainTimeoutMargin,
 		},
 		{
 			name:    "auto scales with a larger budget",
 			cfg:     routerConfig{DrainTimeout: 0},
 			parkCfg: ingress.ParkedRequestConfig{Budget: 30 * time.Second, Max: 1024}.Normalized(),
-			want:    30*time.Second + defaultRouteTimeout + drainTimeoutMargin,
+			want:    ingress.ParkedRequestConfig{Budget: 30 * time.Second, Max: 1024}.MaxResumeHold() + defaultRouteTimeout + drainTimeoutMargin,
 		},
 		{
-			name: "parking disabled still derives from the normalized default budget",
+			name: "parking disabled derives from the fail-fast hold",
 			cfg:  routerConfig{DrainTimeout: 0},
-			// normalized() fills Budget even when Max disables parking, so the
-			// derived drain still covers a later re-enable without a restart
-			// surprise.
+			// With parking off the resumer holds a caller for the fail-fast
+			// budget + committed-attempt wait (18s), longer than parking's
+			// default hold — the derived drain must cover the mode actually
+			// in effect.
 			parkCfg: ingress.ParkedRequestConfig{Max: 0}.Normalized(),
-			want:    ingress.DefaultParkedRequestBudget + defaultRouteTimeout + drainTimeoutMargin,
+			want:    ingress.ParkedRequestConfig{Max: 0}.MaxResumeHold() + defaultRouteTimeout + drainTimeoutMargin,
 		},
 		{
 			name:    "explicit value wins over derivation",
@@ -230,6 +253,45 @@ func TestRouterConfigDrainTimeout(t *testing.T) {
 				t.Errorf("drainTimeout() = %s, want %s", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestShutdownSequenceFitsGracePeriod pins the CODE side of the shutdown
+// arithmetic the deployed manifests reason from: drain-delay + the Envoy
+// drain window + the derived drain-timeout (+ the detached-resume wait on
+// ingress) must fit terminationGracePeriodSeconds with slack for the force
+// stop and the unbounded tracer/meter flush. The drain-delay and grace-period
+// literals MIRROR manifests/ate-install/atenet-router.yaml and
+// atenet-egress.yaml (--drain-delay=13s, terminationGracePeriodSeconds: 75)
+// and must be updated together with them — a manifest-only edit is not
+// caught here; what this test catches is any Go-side constant or derivation
+// growing the sequence past what those manifests budget.
+func TestShutdownSequenceFitsGracePeriod(t *testing.T) {
+	const manifestDrainDelay = 13 * time.Second
+	const manifestGracePeriod = 75 * time.Second
+	const flushSlack = 10 * time.Second // force stop + OTLP shutdown headroom
+
+	cfg := routerConfig{}
+	parkCfg := ingress.DefaultParkedRequestConfig().Normalized()
+
+	// Ingress router: full sequence including the detached-resume wait.
+	ingressSeq := manifestDrainDelay +
+		(defaultRouteTimeout + drainTimeoutMargin) + // the Envoy drain window (router.go)
+		cfg.drainTimeout(parkCfg) +
+		detachedFlightDrainWindow
+	if ingressSeq+flushSlack > manifestGracePeriod {
+		t.Errorf("worst-case ingress shutdown sequence %v + %v slack exceeds the manifest grace period %v; update terminationGracePeriodSeconds and the comments alongside it",
+			ingressSeq, flushSlack, manifestGracePeriod)
+	}
+
+	// Egress deployment: same derivation (it passes no parking flags, so the
+	// defaults apply), no flights phase.
+	egressSeq := manifestDrainDelay +
+		(defaultRouteTimeout + drainTimeoutMargin) +
+		cfg.drainTimeout(parkCfg)
+	if egressSeq+flushSlack > manifestGracePeriod {
+		t.Errorf("worst-case egress shutdown sequence %v + %v slack exceeds the manifest grace period %v",
+			egressSeq, flushSlack, manifestGracePeriod)
 	}
 }
 

@@ -120,13 +120,17 @@ non-zero `active`):
 ```bash
 kubectl -n ate-system port-forward deployment/atenet-router 4040:4040
 curl -s 'http://localhost:4040/statusz?format=json' | jq .parking
-# { "enabled": true, "active": 3, "max_parked": 1024, "max_wait": "5s" }
+# { "enabled": true, "active": 3, "max_parked": 1024, "max_wait": "8s" }
 ```
+
+(`max_wait` is the worst case a request can be held: the park budget plus the
+router's 3s committed-attempt wait.)
 
 The parking metrics are also exported on the router's metrics endpoint
 (`--metrics-listen-addr`, container port `9090`): `atenet.router.parking.active`,
-`atenet.router.parking.wait.duration` (labeled by `outcome`), and
-`atenet.router.parking.rejected`.
+`atenet.router.parking.wait.duration` (labeled by `outcome`),
+`atenet.router.parking.rejected`, and `atenet.router.parking.resume.detached`
+(labeled by `succeeded`).
 
 ### D. Compare with parking disabled
 

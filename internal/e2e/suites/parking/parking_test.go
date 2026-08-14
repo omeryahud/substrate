@@ -17,18 +17,22 @@
 // oversubscribed by two actors, so a request for the suspended actor parks
 // until the worker frees (ParkThenServed) or the park budget elapses
 // (BudgetExhaustion). It runs with the router's default parking configuration
-// (budget 5s); flag-dependent behavior (lot-full shed, parking disabled,
-// custom budgets) is covered by unit tests instead, because the shared router
-// cannot be reconfigured per test.
+// (budget 5s, +3s committed-attempt wait); flag-dependent behavior (lot-full
+// shed, parking disabled, custom budgets) is covered by unit tests instead,
+// because the shared router cannot be reconfigured per test.
 package parking
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -45,6 +49,14 @@ const parkingAtespace = "parking-e2e"
 // jitter but narrow enough to prove parking happened and that the router —
 // not an Envoy timeout — produced the verdict.
 const routerParkBudget = 5 * time.Second
+
+// The bounded extra wait the deployed router grants a caller whose resume
+// attempt is still in flight at the budget (committedAttemptWait in the
+// router's ingress package). The attempt itself is never cancelled; budget +
+// wait is the router's worst-case hold on a request, and every served window
+// below must stay strictly under Envoy's ext_proc message timeout
+// (budget + wait + 2s) so a verdict is provably the router's, not Envoy's.
+const routerCommittedAttemptWait = 3 * time.Second
 
 func TestRequestParking(t *testing.T) {
 	ctx := context.Background()
@@ -80,7 +92,12 @@ func TestRequestParking(t *testing.T) {
 		resumeActor(ctx, t, clients, actorA)
 		waitForActorStatus(ctx, t, clients, actorA, ateapipb.Actor_STATUS_RUNNING)
 
-		// Request actor B: the pool is full, so the request parks.
+		// Request actor B: the pool is full, so the request parks. The budget
+		// clock necessarily also covers A's suspend below — B must be parked
+		// BEFORE the worker starts freeing, or the subtest wouldn't be testing
+		// parking at all. What keeps that robust is the router's
+		// committed-attempt wait: a restore that overshoots the budget under
+		// CI contention is served late instead of cancelled (#675).
 		type result struct {
 			resp *http.Response
 			body string
@@ -103,6 +120,56 @@ func TestRequestParking(t *testing.T) {
 		// statusz gauge, not a sleep, is the synchronization point.
 		waitForParkedCount(ctx, t, statusz, func(active int) bool { return active >= 1 })
 		suspendActor(ctx, t, clients, actorA)
+		// The quantity that decides whether the assertions below can hold is
+		// how much of B's budget was already consumed when the worker freed:
+		// measured from `start` (B's request), it covers the gauge-observe
+		// phase AND A's suspend. B must overlap the suspend to park at all,
+		// so that time is necessarily on B's clock, and the committed-attempt
+		// wait only rescues a slow RESTORE (an attempt in flight), never a
+		// slow worker-free (attempts fail fast until then). If freeing the
+		// worker ate essentially the whole budget, the cluster is too
+		// contended for this subtest's timing to prove anything — skip rather
+		// than misreport contention as a product regression. The slack must
+		// comfortably exceed the retry loop's terminal backoff gap (~600ms at
+		// the default cadence near the 5s budget): with less, the guard can
+		// pass while the worker frees inside a gap no attempt will ever
+		// bridge, and the flight exhausts with the worker sitting idle.
+		if consumed := time.Since(start); consumed > routerParkBudget-1500*time.Millisecond {
+			<-resCh
+			// Establish the sibling subtest's precondition (B on the worker)
+			// before skipping. Two shapes are possible here: a detached
+			// flight claimed the worker just before the budget and is still
+			// restoring B — its actor lock makes a direct resume fail with
+			// Aborted ("another operation is in progress"), and waiting is
+			// the right move — or the budget exhausted with nothing in
+			// flight, B is still SUSPENDED, and it needs an explicit resume.
+			// Poll-and-nudge handles both without turning the skip into a
+			// failure.
+			// The status poll leads each iteration and the deadline is only
+			// enforced right after it: the nudge ResumeActor below is
+			// synchronous and unbounded client-side, so it can legitimately
+			// block past the deadline and SUCCEED — the final status recheck
+			// must get to observe that before the loop may fail.
+			settleDeadline := time.Now().Add(60 * time.Second)
+			for {
+				resp, err := clients.SubstrateAPI.GetActor(ctx, &ateapipb.GetActorRequest{
+					Actor: &ateapipb.ObjectRef{Atespace: parkingAtespace, Name: actorB},
+				})
+				if err == nil && resp.GetStatus() == ateapipb.Actor_STATUS_RUNNING {
+					break
+				}
+				if time.Now().After(settleDeadline) {
+					t.Fatalf("actor %q did not reach RUNNING while settling for the sibling subtest", actorB)
+				}
+				if _, err := clients.SubstrateAPI.ResumeActor(ctx, &ateapipb.ResumeActorRequest{
+					Actor: &ateapipb.ObjectRef{Atespace: parkingAtespace, Name: actorB},
+				}); err != nil && status.Code(err) != codes.Aborted {
+					t.Fatalf("failed to resume actor %q while settling for the sibling subtest: %v", actorB, err)
+				}
+				time.Sleep(1 * time.Second)
+			}
+			t.Skipf("freeing the worker consumed %v of the %v park budget; timing assertions are meaningless under this contention", consumed, routerParkBudget)
+		}
 
 		res := <-resCh
 		elapsed := time.Since(start)
@@ -115,10 +182,32 @@ func TestRequestParking(t *testing.T) {
 		if !strings.Contains(res.body, "hello from") {
 			t.Errorf("parked request body = %q, want the counter greeting", res.body)
 		}
-		if elapsed >= routerParkBudget+2*time.Second {
-			t.Errorf("parked request served after %v, want inside the %v budget window", elapsed, routerParkBudget)
+		// A 200 must land within the router's worst-case hold (budget +
+		// committed-attempt wait) plus client-side slack for the routed
+		// request itself (worker round trip, port-forward). Unlike the 503
+		// bound in BudgetExhaustion, this needs no headroom under Envoy's
+		// ext_proc timeout to prove provenance: Envoy's own timeouts only
+		// mint 5xx, so a 200 is the router's verdict by construction.
+		if elapsed >= routerParkBudget+routerCommittedAttemptWait+2*time.Second {
+			t.Errorf("parked request served after %v, want inside the %v budget + %v wait hold",
+				elapsed, routerParkBudget, routerCommittedAttemptWait)
 		}
 		t.Logf("parked request served after %v", elapsed)
+
+		// The flake's root cause left actors stranded RESUMING with the worker
+		// claimed and no reconciler to recover them (#675): pin that B really
+		// converges, and that a follow-up request is served warm — a stranded
+		// actor would 503 it.
+		waitForActorStatus(ctx, t, clients, actorB, ateapipb.Actor_STATUS_RUNNING)
+		followUp, err := router.Get(ctx, resources.ActorRef{Atespace: parkingAtespace, Name: actorB}, "/")
+		if err != nil {
+			t.Fatalf("follow-up request failed transport-level: %v", err)
+		}
+		followUpBody, _ := io.ReadAll(followUp.Body)
+		followUp.Body.Close()
+		if followUp.StatusCode != http.StatusOK {
+			t.Errorf("follow-up request: status = %d (body %q), want 200 from the resumed actor", followUp.StatusCode, string(followUpBody))
+		}
 
 		// The slot must be released once served.
 		waitForParkedCount(ctx, t, statusz, func(active int) bool { return active == 0 })
@@ -141,20 +230,33 @@ func TestRequestParking(t *testing.T) {
 		if resp.StatusCode != http.StatusServiceUnavailable {
 			t.Fatalf("status = %d (body %q), want 503", resp.StatusCode, string(body))
 		}
-		if !strings.Contains(string(body), "no free workers available") {
-			t.Errorf("body = %q, want the router's capacity verdict", string(body))
+		// The body must be the router's own verdict about this actor — an
+		// Envoy gateway error also arrives as a 503, so the status alone
+		// proves nothing. Which router verdict lands depends on whether a
+		// resume attempt completed within the budget: the capacity message
+		// ("... unavailable: no free workers available") when one did, the
+		// generic unavailable when none did. Both share the prefix and name
+		// the actor; Envoy's bodies never do.
+		wantPrefix := fmt.Sprintf("actor %s unavailable", resources.ActorRef{Atespace: parkingAtespace, Name: actorA})
+		if !strings.HasPrefix(string(body), wantPrefix) {
+			t.Errorf("body = %q, want the router's verdict, prefix %q", string(body), wantPrefix)
 		}
 		if ct := resp.Header.Get("content-type"); ct != "text/plain" {
 			t.Errorf("content-type = %q, want text/plain", ct)
 		}
 		// Lower bound proves the request parked (fail-fast would answer in
-		// milliseconds); upper bound proves the router's own verdict landed
-		// before Envoy's ext_proc timeout (budget+5s) could.
+		// milliseconds). Provenance — that the verdict is the router's and
+		// not Envoy's — is proven by the body prefix above, so the upper
+		// bound only sanity-checks the hold: with the pool held by B every
+		// attempt normally fails fast and the flight exhausts at the budget,
+		// but a single slow ateapi round trip outstanding at the budget
+		// legitimately holds the caller to its wait bound (budget + 3s), so
+		// the bound sits above that, not between the two.
 		if elapsed < routerParkBudget-time.Second {
 			t.Errorf("503 after %v: too fast, the request did not park for the budget", elapsed)
 		}
-		if elapsed > routerParkBudget+4*time.Second {
-			t.Errorf("503 after %v: too slow, likely an Envoy timeout rather than the router's verdict", elapsed)
+		if elapsed > routerParkBudget+routerCommittedAttemptWait+2*time.Second {
+			t.Errorf("503 after %v: slower than the router's worst-case hold plus slack", elapsed)
 		}
 		t.Logf("budget exhausted after %v", elapsed)
 	})

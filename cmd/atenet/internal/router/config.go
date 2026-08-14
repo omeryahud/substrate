@@ -193,21 +193,27 @@ func (c routerConfig) extProcMaxRequests() int {
 }
 
 // drainTimeoutMargin is the slack added on top of the bounded in-flight work
-// when deriving the drain timeout, mirroring the +5s Envoy ext_proc
-// MessageTimeout margin so the router always sheds before a hard cut.
+// (the worst-case resume hold plus a full route) when deriving the drain
+// timeout, so the router always sheds gracefully before the hard force-stop.
+// It is deliberately larger than the 2s ext_proc message-timeout margin
+// (ingress.ExtProcMessageTimeoutFor): that one covers only a verdict reaching
+// Envoy over loopback, while this covers the tail of real work finishing
+// during a drain.
 const drainTimeoutMargin = 5 * time.Second
 
 // drainTimeout resolves the effective ext_proc drain deadline: an explicit
-// flag wins; 0 derives park budget + the DEFAULT route timeout + margin. The
-// derivation deliberately ignores a configured --route-timeout so a raised
-// route ceiling cannot silently stretch shutdown past the pod's grace period
-// (see defaultRouteTimeout); operators pair a long route timeout with an
-// explicit --drain-timeout instead.
+// flag wins; 0 derives the worst-case resume hold (the mode's retry budget +
+// committed-attempt wait — see ingress.ParkedRequestConfig.MaxResumeHold) +
+// the DEFAULT route timeout + margin. The derivation deliberately ignores a
+// configured --route-timeout so a raised route ceiling cannot silently
+// stretch shutdown past the pod's grace period (see defaultRouteTimeout);
+// operators pair a long route timeout with an explicit --drain-timeout
+// instead.
 func (c routerConfig) drainTimeout(parkCfg ingress.ParkedRequestConfig) time.Duration {
 	if c.DrainTimeout > 0 {
 		return c.DrainTimeout
 	}
-	return parkCfg.Budget + defaultRouteTimeout + drainTimeoutMargin
+	return parkCfg.MaxResumeHold() + defaultRouteTimeout + drainTimeoutMargin
 }
 
 // validate rejects flag combinations that would make the router misbehave
@@ -238,11 +244,15 @@ func (c routerConfig) validate() error {
 		return fmt.Errorf("--drain-delay must not be negative, got %s", c.DrainDelay)
 	}
 	if c.DrainTimeout < 0 {
-		return fmt.Errorf("--drain-timeout must not be negative, got %s (0 derives it from --parked-request-budget)", c.DrainTimeout)
+		return fmt.Errorf("--drain-timeout must not be negative, got %s (0 derives it from the worst-case resume hold)", c.DrainTimeout)
 	}
-	if c.DrainTimeout > 0 && c.ParkedRequest.Enabled() && c.DrainTimeout < c.ParkedRequest.Normalized().Budget {
-		return fmt.Errorf("--drain-timeout (%s) must be >= --parked-request-budget (%s): a drain shorter than the parking budget resets parked requests on shutdown instead of letting them finish",
-			c.DrainTimeout, c.ParkedRequest.Normalized().Budget)
+	// The floor applies in BOTH modes — MaxResumeHold is mode-aware, and the
+	// fail-fast hold (18s) is the longer of the two: gating this on parking
+	// being enabled would let a short drain cut exactly the held requests it
+	// exists to protect.
+	if c.DrainTimeout > 0 && c.DrainTimeout < c.ParkedRequest.MaxResumeHold() {
+		return fmt.Errorf("--drain-timeout (%s) must be >= the worst-case resume hold (%s: the mode's resume budget + the committed-attempt wait): a shorter drain force-stops requests the router is still holding",
+			c.DrainTimeout, c.ParkedRequest.MaxResumeHold())
 	}
 	return nil
 }

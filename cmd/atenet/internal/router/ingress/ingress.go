@@ -58,7 +58,7 @@ type Handler struct {
 
 func New(apiClient ateapipb.ControlClient, parkCfg ParkedRequestConfig, parkMetrics *ParkingMetrics, routeViaAuthority bool) *Handler {
 	return &Handler{
-		resumer:           NewActorResumer(apiClient, withParking(parkCfg)),
+		resumer:           NewActorResumer(apiClient, withParking(parkCfg), withMetrics(parkMetrics)),
 		parking:           newParkingLot(parkCfg, parkMetrics),
 		routeViaAuthority: routeViaAuthority,
 	}
@@ -68,6 +68,14 @@ func (h *Handler) Direction() extproc.Direction { return extproc.DirectionIngres
 
 // ParkingStatus returns a snapshot of the parking lot for the /statusz page.
 func (h *Handler) ParkingStatus() ParkingStatus { return h.parking.status() }
+
+// WaitResumeFlights blocks until every in-flight resume — detached attempts
+// included — has completed, or ctx expires. The shutdown sequence calls this
+// after the ext_proc drain, because a detached attempt holds no ext_proc
+// stream and exiting the process would cancel it mid-restore.
+func (h *Handler) WaitResumeFlights(ctx context.Context) error {
+	return h.resumer.WaitFlights(ctx)
+}
 
 func (h *Handler) HandleRequestHeaders(ctx context.Context, md *extproc.RequestMetadata) (extproc.Result, error) {
 	slog.InfoContext(ctx, "Request", slog.String("host", md.Host))

@@ -84,9 +84,11 @@ const (
 	OriginalDstClusterName = "actor_original_dst"
 )
 
-// defaultExtProcMessageTimeout is Envoy's per-message ext_proc response timeout
-// when request parking is off. With parking on it must cover the park budget,
-// otherwise Envoy abandons a parked request (500) long before the router does.
+// defaultExtProcMessageTimeout is Envoy's per-message ext_proc response
+// timeout when nothing overrides it. The router always overrides it with the
+// derived worst-case resume hold + margin (ingress.ExtProcMessageTimeoutFor);
+// anything shorter would make Envoy abandon a held request (500) before the
+// router's own verdict lands.
 const defaultExtProcMessageTimeout = 5 * time.Second
 
 // defaultExtProcMaxRequests is the circuit-breaker max_requests set on the
@@ -157,7 +159,8 @@ type XdsServer struct {
 	traceRootSamplingPercent float64
 
 	// extProcMessageTimeout bounds how long Envoy waits for the router's ext_proc
-	// response. Must be >= the parking budget so parked requests aren't cut short.
+	// response. Must exceed the router's worst-case resume hold (retry budget +
+	// committed-attempt wait) so held requests aren't cut short.
 	extProcMessageTimeout time.Duration
 
 	// extProcMaxRequests is the circuit-breaker max_requests on the ext_proc
@@ -198,9 +201,9 @@ func (x *XdsServer) SetConfig(ingressPort int, extprocPort int, extprocAddr stri
 }
 
 // SetExtProcMessageTimeout sets how long Envoy waits for the router's ext_proc
-// response. Call with (parking budget + margin) when parking is enabled so
-// Envoy keeps a parked request open until the router itself decides. A
-// non-positive value leaves the default unchanged.
+// response. Call with ingress.ExtProcMessageTimeoutFor's derivation (worst-case
+// resume hold + margin) so Envoy keeps a held request open until the router
+// itself decides. A non-positive value leaves the default unchanged.
 func (x *XdsServer) SetExtProcMessageTimeout(d time.Duration) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
@@ -706,8 +709,9 @@ func (x *XdsServer) buildHcm(statPrefix string) *anypb.Any {
 			AllowAllRouting: &wrapperspb.BoolValue{Value: true},
 		},
 		// Bound how long Envoy waits for the router's ext_proc response. Must
-		// cover the parking budget (see SetExtProcMessageTimeout): a parked
-		// request is held open here until the router itself resolves or sheds it.
+		// cover the worst-case resume hold (see SetExtProcMessageTimeout): a
+		// held request stays open here until the router itself resolves or
+		// sheds it.
 		MessageTimeout: durationpb.New(x.extProcMessageTimeout),
 		ProcessingMode: &extprocv3filter.ProcessingMode{
 			RequestHeaderMode:   extprocv3filter.ProcessingMode_SEND,

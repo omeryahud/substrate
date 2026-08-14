@@ -38,6 +38,8 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	extprocv3filter "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
+	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	discoverygrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	secretgrpc "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
@@ -798,4 +800,53 @@ func TestXdsServer_BuildTracingRandomSamplingFromPolicy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The ext_proc message timeout must reach the dataplane exactly as derived —
+// in BOTH parking modes — or Envoy cuts held requests with a generic gateway
+// error before the router's own verdict lands. This walks the generated HCM
+// the way Envoy reads it, so re-gating the call site or dropping the setter
+// fails here rather than in production.
+func TestXdsServer_ExtProcMessageTimeout(t *testing.T) {
+	messageTimeout := func(t *testing.T, x *XdsServer) time.Duration {
+		t.Helper()
+		var hcm hcmv3.HttpConnectionManager
+		if err := x.buildHcm("test").UnmarshalTo(&hcm); err != nil {
+			t.Fatalf("unmarshal HCM: %v", err)
+		}
+		for _, f := range hcm.GetHttpFilters() {
+			var ep extprocv3filter.ExternalProcessor
+			if !f.GetTypedConfig().MessageIs(&ep) {
+				continue
+			}
+			if err := f.GetTypedConfig().UnmarshalTo(&ep); err != nil {
+				t.Fatalf("unmarshal ext_proc filter: %v", err)
+			}
+			return ep.GetMessageTimeout().AsDuration()
+		}
+		t.Fatal("no ext_proc filter in the generated HCM")
+		return 0
+	}
+
+	t.Run("Default", func(t *testing.T) {
+		if got := messageTimeout(t, NewXdsServer(0)); got != defaultExtProcMessageTimeout {
+			t.Errorf("default message timeout = %v, want %v", got, defaultExtProcMessageTimeout)
+		}
+	})
+
+	t.Run("DerivedParkingEnabled", func(t *testing.T) {
+		x := NewXdsServer(0)
+		x.SetExtProcMessageTimeout(ingress.ExtProcMessageTimeoutFor(ingress.DefaultParkedRequestConfig()))
+		if got := messageTimeout(t, x); got != 10*time.Second {
+			t.Errorf("derived parking-enabled message timeout = %v, want the deployed 10s", got)
+		}
+	})
+
+	t.Run("DerivedFailFast", func(t *testing.T) {
+		x := NewXdsServer(0)
+		x.SetExtProcMessageTimeout(ingress.ExtProcMessageTimeoutFor(ingress.ParkedRequestConfig{Max: 0}))
+		if got := messageTimeout(t, x); got != 20*time.Second {
+			t.Errorf("derived fail-fast message timeout = %v, want 20s (15s budget + 3s wait + 2s margin)", got)
+		}
+	})
 }

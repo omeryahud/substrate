@@ -183,13 +183,17 @@ until ! run_kubectl get pod -n "${ROUTER_NS}" "${POD}" >/dev/null 2>&1; do sleep
 ELAPSED=$(( $(date +%s) - DELETE_T ))
 echo "pod terminated ${ELAPSED}s after deletion"
 (( ELAPSED >= 10 )) || fail "terminated in ${ELAPSED}s — before the 13s drain-delay could run; the drain sequence was skipped"
-(( ELAPSED <= 55 )) || fail "terminated in ${ELAPSED}s — at the grace period; SIGKILL path, the drain-complete handshake did not release Envoy"
+# Worst case of the sequence is ~56s (drain-delay 13 + Envoy window ~15 +
+# derived drain-timeout 23 + detached-resume wait 5); the 70s bound sits
+# between that and terminationGracePeriodSeconds (75), so a pass proves the
+# drain-complete handshake released Envoy rather than the SIGKILL path.
+(( ELAPSED <= 70 )) || fail "terminated in ${ELAPSED}s — at the grace period; SIGKILL path, the drain-complete handshake did not release Envoy"
 
 log_step "drain log sequence"
-for marker in "Shutdown signal received; draining" "Draining dataplane" "Starting ext_proc drain" "Drain-complete marker written" "Shutdown complete"; do
+for marker in "Shutdown signal received; draining" "Draining dataplane" "Starting ext_proc drain" "Drain-complete marker written" "resume flights" "Shutdown complete"; do
   grep -q "${marker}" "${LOG_FILE}" || fail "router log missing \"${marker}\" (see ${LOG_FILE})"
 done
-grep -E "Shutdown signal|Draining dataplane|Dataplane drain|ext_proc drain|marker written|Shutdown complete" "${LOG_FILE}" | sed 's/^/  /'
+grep -E "Shutdown signal|Draining dataplane|Dataplane drain|ext_proc drain|marker written|resume flights|Shutdown complete" "${LOG_FILE}" | sed 's/^/  /'
 
 log_step "waiting for the replacement router pod"
 run_kubectl rollout status deploy/atenet-router -n "${ROUTER_NS}" --timeout=120s >/dev/null

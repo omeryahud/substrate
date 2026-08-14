@@ -346,3 +346,132 @@ func TestDrainMarkerLifecycle(t *testing.T) {
 		t.Fatalf("stale marker not removed: %v", err)
 	}
 }
+
+// fakeFlightWaiter is a flightWaiter that blocks until release is closed or
+// ctx expires, simulating a resume attempt still running detached. The error
+// it returned is buffered into got for tests that assert which way the wait
+// ended.
+type fakeFlightWaiter struct {
+	called  atomic.Bool
+	release chan struct{}
+	got     chan error
+}
+
+func newFakeFlightWaiter() *fakeFlightWaiter {
+	return &fakeFlightWaiter{release: make(chan struct{}), got: make(chan error, 1)}
+}
+
+func (f *fakeFlightWaiter) WaitResumeFlights(ctx context.Context) error {
+	f.called.Store(true)
+	var err error
+	select {
+	case <-f.release:
+	case <-ctx.Done():
+		err = ctx.Err()
+	}
+	f.got <- err
+	return err
+}
+
+// TestDrainOnShutdownWaitsForDetachedFlights asserts the flight wait runs
+// after the ext_proc drain AND after stopRest (whose marker write releases
+// the dataplane's preStop hook — detached resumes are invisible to the
+// dataplane, so they must not hold it), but before the drain completes: this
+// phase is the only thing standing between a detached resume and process
+// exit cancelling it mid-restore.
+func TestDrainOnShutdownWaitsForDetachedFlights(t *testing.T) {
+	stopper := newFakeStopper()
+	close(stopper.release) // no in-flight streams; graceful drain is instant
+	flights := newFakeFlightWaiter()
+	close(flights.release) // flights finish within the window
+
+	var flightsWaitedBeforeStopRest atomic.Bool
+	ctx, cancel := context.WithCancel(context.Background())
+	done := drainOnShutdown(ctx, drainParams{
+		readiness:     &serverboot.Readiness{},
+		extproc:       stopper,
+		timeout:       time.Second,
+		flights:       flights,
+		flightsWindow: time.Second,
+		stopRest: func() {
+			flightsWaitedBeforeStopRest.Store(flights.called.Load())
+		},
+	})
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("drain did not complete")
+	}
+	if !flights.called.Load() {
+		t.Error("detached resume flights were never waited for")
+	}
+	if flightsWaitedBeforeStopRest.Load() {
+		t.Error("the detached-flight wait ran before stopRest; it must not delay the drain marker that releases the dataplane's preStop hook")
+	}
+}
+
+// TestDrainOnShutdownFlightWindowDefaults asserts a zero flightsWindow falls
+// back to detachedFlightDrainWindow instead of producing an already-expired
+// context that would skip the wait while logging the alarming
+// cancelled-mid-restore warning.
+func TestDrainOnShutdownFlightWindowDefaults(t *testing.T) {
+	stopper := newFakeStopper()
+	close(stopper.release)
+	flights := newFakeFlightWaiter()
+	go func() {
+		time.Sleep(200 * time.Millisecond) // outlives a zero window, well inside the default
+		close(flights.release)
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := drainOnShutdown(ctx, drainParams{
+		readiness: &serverboot.Readiness{},
+		extproc:   stopper,
+		timeout:   time.Second,
+		flights:   flights,
+		// Deliberately unset: the default must give the flight time to land.
+		stopRest: func() {},
+	})
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("drain did not complete")
+	}
+	select {
+	case err := <-flights.got:
+		if err != nil {
+			t.Errorf("flight wait returned %v; a zero window must default to %v, not expire immediately", err, detachedFlightDrainWindow)
+		}
+	default:
+		t.Error("flight waiter was never invoked")
+	}
+}
+
+// TestDrainOnShutdownFlightWindowBounds asserts a flight that never finishes
+// cannot wedge shutdown: the window expires and the sequence completes.
+func TestDrainOnShutdownFlightWindowBounds(t *testing.T) {
+	stopper := newFakeStopper()
+	close(stopper.release)
+	flights := newFakeFlightWaiter() // release never closed
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := drainOnShutdown(ctx, drainParams{
+		readiness:     &serverboot.Readiness{},
+		extproc:       stopper,
+		timeout:       time.Second,
+		flights:       flights,
+		flightsWindow: 50 * time.Millisecond,
+		stopRest:      func() {},
+	})
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("drain wedged on a flight that never finished; the window must bound it")
+	}
+}

@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -66,11 +65,14 @@ func (s *RouterServer) startEnvoyDataplane(ctx context.Context, g *errgroup.Grou
 
 	xdsSrv.SetRouteTimeout(s.cfg.RouteTimeout)
 	xdsSrv.SetExtProcMaxRequests(s.cfg.extProcMaxRequests())
-	if parkCfg.Enabled() {
-		// Envoy must keep a parked request open at least as long as the router
-		// will hold it; add a margin so the router surfaces its own 503 first.
-		xdsSrv.SetExtProcMessageTimeout(parkCfg.Budget + 5*time.Second)
-	}
+	// Envoy must keep a resume-gated request open longer than the router's
+	// worst-case hold — the mode's retry budget + the committed-attempt wait —
+	// so the router's own verdict (200 or a meaningful 503) always lands
+	// before Envoy's timeout would replace it with a generic gateway error.
+	// Derived in BOTH modes: fail-fast holds a caller even longer than parking
+	// does (15s+3s vs 5s+3s), so gating this on Enabled() would leave Envoy's
+	// 5s default cutting every slow fail-fast resume short.
+	xdsSrv.SetExtProcMessageTimeout(ingress.ExtProcMessageTimeoutFor(parkCfg))
 
 	xdsSrv.SetTlsConfig(s.cfg.HttpsPort, s.cfg.EnvoyCertPath)
 	xdsSrv.SetUpstreamTls(s.cfg.UpstreamCredentialBundlePath, s.cfg.UpstreamTrustBundlePath, s.cfg.UpstreamSpiffePrefix)

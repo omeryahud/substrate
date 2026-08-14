@@ -134,7 +134,8 @@ func (s *RouterServer) Run(ctx context.Context) error {
 	// so in-flight ext_proc streams (parked requests, most of all) are not
 	// cancelled the moment the signal arrives. drainOnShutdown drives the
 	// shutdown sequence: readiness flip → route-drain delay → dataplane drain →
-	// ext_proc drain → stop the rest.
+	// ext_proc drain → stop the rest (writing the drain marker) → wait out
+	// resume attempts still running detached.
 	shutdownCtx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 
@@ -326,6 +327,12 @@ func (s *RouterServer) Run(ctx context.Context) error {
 	if s.cfg.atenetRouter() == atenetRouterEnvoy {
 		dataplane = newEnvoyDrainer(s.cfg.EnvoyAdminAddr)
 	}
+	// Egress-only instances have no ingress handler and start no resume
+	// flights; a nil waiter skips the phase.
+	var flights flightWaiter
+	if s.ingressHandler != nil {
+		flights = s.ingressHandler
+	}
 	drainDone := drainOnShutdown(shutdownCtx, drainParams{
 		readiness:       readiness,
 		delay:           s.cfg.DrainDelay,
@@ -333,6 +340,8 @@ func (s *RouterServer) Run(ctx context.Context) error {
 		dataplaneWindow: defaultRouteTimeout + drainTimeoutMargin,
 		extproc:         extprocGRPC,
 		timeout:         s.cfg.drainTimeout(parkCfg),
+		flights:         flights,
+		flightsWindow:   detachedFlightDrainWindow,
 		stopRest: func() {
 			// Written first so the dataplane container's preStop hook (polling
 			// this marker on the shared emptyDir) releases as soon as nothing

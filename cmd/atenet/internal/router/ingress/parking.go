@@ -43,6 +43,29 @@ const (
 	DefaultParkedRequestRetryJitter   = 0.1
 )
 
+// extProcMessageTimeoutMargin is how much longer Envoy waits on the ext_proc
+// stream than the router can possibly hold a parked request. Without a margin
+// the two deadlines race, and an Envoy win replaces the router's meaningful
+// 503 ("no free workers available") with a generic gateway error. The margin
+// only has to cover the router's verdict reaching Envoy over loopback — timer
+// skew and goroutine scheduling, not work — so it is far smaller than the
+// drain margin, which covers a whole route. Note the net headroom SHRANK when
+// the committed-attempt wait was introduced: the deployed timeout stayed 10s
+// while the hold grew from 5s to 8s, so this 2s is all that separates the
+// router's latest verdict from Envoy's cutoff — sufficient for loopback
+// delivery, but not a number to shave further.
+const extProcMessageTimeoutMargin = 2 * time.Second
+
+// ExtProcMessageTimeoutFor returns the ext_proc message timeout covering the
+// router's worst-case hold on a resume-gated request plus the margin above.
+// The resumer's hold and Envoy's patience must move together — raising one
+// without the other reintroduces the race the margin exists to prevent — which
+// is why this is derived, never hardcoded. At the defaults it is 5s + 3s + 2s
+// = 10s with parking enabled, and 15s + 3s + 2s = 20s in fail-fast mode.
+func ExtProcMessageTimeoutFor(cfg ParkedRequestConfig) time.Duration {
+	return cfg.MaxResumeHold() + extProcMessageTimeoutMargin
+}
+
 // ParkingStatus is a snapshot of the request-parking lot for the status page.
 type ParkingStatus struct {
 	Enabled   bool   `json:"enabled"`
@@ -58,7 +81,8 @@ type parkOutcome string
 // Park-wait outcomes, recorded on the parking.wait.duration histogram.
 const (
 	parkOutcomeServed          parkOutcome = "served"           // resume succeeded and the request was routed
-	parkOutcomeBudgetExhausted parkOutcome = "budget_exhausted" // the park budget elapsed while still blocked on a retryable condition
+	parkOutcomeServedLate      parkOutcome = "served_late"      // served, but only past the budget, thanks to the committed-attempt wait
+	parkOutcomeBudgetExhausted parkOutcome = "budget_exhausted" // the park budget (or the caller wait bound) elapsed while still blocked
 	parkOutcomeTimeout         parkOutcome = "timeout"          // the request's deadline elapsed while parked
 	parkOutcomeCanceled        parkOutcome = "canceled"         // the client disconnected while parked
 	parkOutcomeError           parkOutcome = "error"            // resume failed
@@ -93,6 +117,20 @@ type ParkedRequestConfig struct {
 // on/off switch: setting Max to 0 disables it, applying a fail-fast behavior
 // (no admission cap, no retry on pool saturation).
 func (c ParkedRequestConfig) Enabled() bool { return c.Max > 0 }
+
+// MaxResumeHold returns the router's worst-case hold on a single resume-gated
+// request: the retry budget of the mode in effect — the park budget, or the
+// fail-fast budget when parking is disabled — plus the committed-attempt wait
+// (bounding how long a caller waits for an attempt already in flight at the
+// budget). Everything that must outlast the router's hold — Envoy's ext_proc
+// message timeout, the drain deadline, the /statusz max wait — derives from
+// this so the quantities cannot drift apart.
+func (c ParkedRequestConfig) MaxResumeHold() time.Duration {
+	if !c.Enabled() {
+		return failFastResumeBudget + CommittedAttemptWait
+	}
+	return c.Normalized().Budget + CommittedAttemptWait
+}
 
 // Normalized returns the config with non-positive budget and retry parameters
 // replaced by their defaults, so every consumer (the resumer's retry loop and
@@ -151,7 +189,9 @@ type parkingLot struct {
 }
 
 func newParkingLot(cfg ParkedRequestConfig, m *ParkingMetrics) *parkingLot {
-	return &parkingLot{cfg: cfg, metrics: m}
+	// Normalized so the served/served_late split below compares against the
+	// same effective budget the resumer's retry loop runs with.
+	return &parkingLot{cfg: cfg.Normalized(), metrics: m}
 }
 
 // enter attempts to reserve a parking slot. On success it returns a release
@@ -190,10 +230,22 @@ func (l *parkingLot) enter(ctx context.Context) (release func(outcome parkOutcom
 				slog.Error("parking lot slot released more times than acquired")
 			}
 			l.mu.Unlock()
+			waited := time.Since(start)
 			l.metrics.addActive(ctx, -1)
-			l.metrics.recordWait(ctx, time.Since(start), outcome)
+			l.metrics.recordWait(ctx, waited, l.finalOutcome(outcome, waited))
 		})
 	}, true
+}
+
+// finalOutcome upgrades a served outcome to served_late when the request was
+// held past the park budget — served only thanks to the committed-attempt
+// wait. The dedicated label is the operator's signal that snapshot restores
+// are drifting into the budget (#675).
+func (l *parkingLot) finalOutcome(outcome parkOutcome, waited time.Duration) parkOutcome {
+	if outcome == parkOutcomeServed && waited > l.cfg.Budget {
+		return parkOutcomeServedLate
+	}
+	return outcome
 }
 
 // activeCount returns the number of requests currently parked.
@@ -209,7 +261,9 @@ func (l *parkingLot) status() ParkingStatus {
 		Enabled:   l.cfg.Enabled(),
 		Active:    l.activeCount(),
 		MaxParked: l.cfg.Max,
-		MaxWait:   l.cfg.Budget.String(),
+		// The true worst case a caller can be held, not just the retry budget:
+		// understating it here misleads whoever is debugging a slow request.
+		MaxWait: l.cfg.MaxResumeHold().String(),
 	}
 }
 

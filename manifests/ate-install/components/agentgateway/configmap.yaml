@@ -54,6 +54,13 @@ data:
       - path:
           pathPrefix: /
       policies:
+        # No explicit ext_proc timeout is set here, so agentgateway's built-in
+        # default governs. It must stay ABOVE the router's worst-case resume
+        # hold — the resume budget + 3s committed-attempt wait (8s at the
+        # deployed defaults; see docs/request-parking.md) — or the gateway
+        # replaces the router's verdict on held requests with a generic error.
+        # The Envoy dataplane derives this automatically; this static overlay
+        # cannot, so revisit when tuning either side.
         extProc:
           host: 127.0.0.1:50051
           failureMode: failClosed

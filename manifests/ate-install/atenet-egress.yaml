@@ -204,7 +204,12 @@ spec:
         sysctls:
         - name: net.ipv4.ip_unprivileged_port_start
           value: "0"
-      terminationGracePeriodSeconds: 60
+      # Sized like the router's: drain-delay (13s) + Envoy drain window
+      # (~15s) + the derived --drain-timeout (worst-case resume hold + route
+      # timeout + margin, ~23s at defaults — the derivation is shared with
+      # the ingress router even though egress never parks) — ~51s total —
+      # plus slack for the force stop and the untimed tracer/meter flush.
+      terminationGracePeriodSeconds: 75
       containers:
       - name: envoy
         image: envoyproxy/envoy:v1.34-latest

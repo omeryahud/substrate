@@ -21,9 +21,13 @@ Router has several responsibilities:
   new connections, waits out endpoint propagation (`--drain-delay`), drains the
   dataplane's established connections (Envoy only — driven over its admin API;
   agentgateway manages its own termination), gracefully stops the ext_proc
-  server so parked requests finish normally (`--drain-timeout`, derived from
-  the parking budget), then writes a drain-complete marker that releases the
-  dataplane container's `preStop` hook. See `drain.go` and `envoydrain.go`.
+  server so held requests finish normally (`--drain-timeout`, derived from the
+  worst-case resume hold: the mode's resume budget + the committed-attempt
+  wait, plus the route timeout and margin), writes the drain-complete marker
+  that releases the dataplane container's `preStop` hook, and only then waits
+  briefly for resume attempts still running detached — they hold no ext_proc
+  stream (so they must not delay the dataplane's release) and process exit
+  would cancel them mid-restore. See `drain.go` and `envoydrain.go`.
 * Authenticates actor identity on egress: on every CONNECT, the egress
   gateway's ext_proc handler re-verifies the actor's client certificate against
   the actor-identity CA, reads the `ActorIdentity` X.509 extension out of it,

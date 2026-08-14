@@ -29,20 +29,23 @@ import (
 // Request-parking instruments. parking.active is the live count of parked
 // requests; parking.wait.duration is how long each request stayed parked
 // (labeled by outcome); parking.rejected counts requests shed because the
-// parking lot was full.
+// parking lot was full; parking.resume.detached counts resume attempts that
+// outlived the caller wait bound and continued detached.
 const (
-	parkingActiveMetricName   = "atenet.router.parking.active"
-	parkingWaitMetricName     = "atenet.router.parking.wait.duration"
-	parkingRejectedMetricName = "atenet.router.parking.rejected"
+	parkingActiveMetricName         = "atenet.router.parking.active"
+	parkingWaitMetricName           = "atenet.router.parking.wait.duration"
+	parkingRejectedMetricName       = "atenet.router.parking.rejected"
+	parkingResumeDetachedMetricName = "atenet.router.parking.resume.detached"
 )
 
 // ParkingMetrics bundles the OpenTelemetry instruments used by the parking lot.
 // A nil *ParkingMetrics is safe to use: every method becomes a no-op, which
 // keeps tests and metric-free deployments simple.
 type ParkingMetrics struct {
-	active   metric.Int64UpDownCounter
-	wait     metric.Float64Histogram
-	rejected metric.Int64Counter
+	active         metric.Int64UpDownCounter
+	wait           metric.Float64Histogram
+	rejected       metric.Int64Counter
+	resumeDetached metric.Int64Counter
 }
 
 // NewParkingMetrics creates the request-parking instruments from the global
@@ -63,8 +66,15 @@ func NewParkingMetrics() (*ParkingMetrics, error) {
 		parkingWaitMetricName,
 		metric.WithUnit("s"),
 		metric.WithDescription("time a request spent parked in the router before being served, timing out, or failing"),
+		// The 8 boundary sits at the default worst-case hold (park budget +
+		// committed-attempt wait), so "waited the full bound" stays readable
+		// straight off the histogram rather than blurring into (5,10]. The 18
+		// boundary serves the same purpose for --parked-request-budget=15s;
+		// it is NOT the fail-fast hold — with parking disabled the lot no-ops
+		// and nothing records this histogram at all (the detached counter,
+		// wired unconditionally, is fail-fast's only wait observability).
 		metric.WithExplicitBucketBoundaries(
-			0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 15, 30, 45, 60,
+			0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 8, 10, 15, 18, 30, 45, 60,
 		),
 	)
 	if err != nil {
@@ -80,7 +90,16 @@ func NewParkingMetrics() (*ParkingMetrics, error) {
 		return nil, fmt.Errorf("create %s counter: %w", parkingRejectedMetricName, err)
 	}
 
-	return &ParkingMetrics{active: active, wait: wait, rejected: rejected}, nil
+	resumeDetached, err := meter.Int64Counter(
+		parkingResumeDetachedMetricName,
+		metric.WithUnit("{resume}"),
+		metric.WithDescription("resume attempts that ran past the flight's retry budget + committed-attempt wait; the flight's first caller was answered before completion, though a later joiner may still have been served"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create %s counter: %w", parkingResumeDetachedMetricName, err)
+	}
+
+	return &ParkingMetrics{active: active, wait: wait, rejected: rejected, resumeDetached: resumeDetached}, nil
 }
 
 func (m *ParkingMetrics) addActive(ctx context.Context, delta int64) {
@@ -102,4 +121,15 @@ func (m *ParkingMetrics) recordRejected(ctx context.Context) {
 		return
 	}
 	m.rejected.Add(ctx, 1)
+}
+
+// recordResumeDetached counts a resume attempt that ran past the flight's
+// budget + committed wait. The succeeded label separates the benign case (the
+// restore landed late and the actor converged) from the one needing attention
+// (the detached attempt failed too).
+func (m *ParkingMetrics) recordResumeDetached(ctx context.Context, succeeded bool) {
+	if m == nil || m.resumeDetached == nil {
+		return
+	}
+	m.resumeDetached.Add(ctx, 1, metric.WithAttributes(attribute.Bool("succeeded", succeeded)))
 }
