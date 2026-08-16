@@ -43,6 +43,19 @@ exponential backoff until either
   underlying capacity error is returned, surfacing as `503 "actor <id>
   unavailable: no free workers available"`.
 
+**The budget bounds retries, not a committed resume.** When the budget elapses
+the router stops starting new resume attempts, but an attempt already in
+flight is **never cancelled**: the control plane durably claims the worker and
+marks the actor `RESUMING` *before* the snapshot restore begins and rolls back
+neither on cancellation, so a cancel would discard the restore and strand the
+worker with the actor stuck `RESUMING` — the pool stays starved for every
+request behind it. Instead the router waits for that attempt's real result: a
+restore that overshoots the budget (routine under node contention) is **served
+late** rather than failed, and a late retryable error still surfaces as the
+capacity `503`. The attempt is bounded by the control plane's own server-side
+RPC deadline, and Envoy's ext_proc message timeout (`budget + 5s`) remains the
+ceiling on how long a client is held either way.
+
 To bound resource use and provide backpressure, the router admits requests to a
 **parking lot** of fixed capacity (`--parked-request-max`, default `1024`). Each
 in-flight resume occupies one slot. When the lot is full, further requests are
