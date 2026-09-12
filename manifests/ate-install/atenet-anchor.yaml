@@ -1,0 +1,116 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The connection anchor terminates the TCP connections of Actors whose
+# ActorTemplate is annotated ate.dev/connection-policy=Preserve, so those
+# connections survive Suspend and Resume on any worker. The router sends such
+# an Actor's ingress here (port 443) instead of to its worker; the worker's
+# ateom tunnels the sandbox's frames here (port 445) and probes readiness
+# through here (port 446).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: atenet-anchor
+  namespace: ate-system
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: atenet-anchor
+  namespace: ate-system
+  labels:
+    app: atenet-anchor
+spec:
+  # One replica: every anchored Actor's endpoints live in this pod, and the
+  # router and workers reach it by its Service name. Sharding Actors across
+  # several anchors is a follow-up.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: atenet-anchor
+  template:
+    metadata:
+      labels:
+        app: atenet-anchor
+    spec:
+      serviceAccountName: atenet-anchor
+      containers:
+      - name: atenet-anchor
+        image: ko://github.com/agent-substrate/substrate/cmd/atenet
+        args:
+        - anchor
+        - --ingress-listen=:443
+        - --attach-listen=:445
+        - --control-listen=:446
+        - --ingress-credential-bundle=/run/podidentity.podcert.ate.dev/credential-bundle.pem
+        - --credential-bundle=/run/servicedns.podcert.ate.dev/credential-bundle.pem
+        - --trust-bundle=/run/podidentity.podcert.ate.dev/trust-bundle.pem
+        ports:
+        - name: https
+          containerPort: 443
+        - name: attach
+          containerPort: 445
+        - name: control
+          containerPort: 446
+        volumeMounts:
+        - name: servicedns
+          mountPath: /run/servicedns.podcert.ate.dev
+          readOnly: true
+        - name: podidentity
+          mountPath: /run/podidentity.podcert.ate.dev
+          readOnly: true
+      volumes:
+      - name: servicedns
+        projected:
+          sources:
+          - podCertificate:
+              signerName: servicedns.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+      - name: podidentity
+        projected:
+          sources:
+          - podCertificate:
+              signerName: podidentity.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+          - clusterTrustBundle:
+              signerName: podidentity.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: trust-bundle.pem
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: atenet-anchor
+  namespace: ate-system
+spec:
+  selector:
+    app: atenet-anchor
+  ports:
+  - name: https
+    port: 443
+    targetPort: https
+  - name: attach
+    port: 445
+    targetPort: attach
+  - name: control
+    port: 446
+    targetPort: control

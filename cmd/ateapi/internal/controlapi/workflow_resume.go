@@ -510,6 +510,7 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	}
 
 	newAssignment := workerAssignmentFrom(assignedWorker)
+	newAssignment.AnchorAddress = w.anchorIngressAddress(actorTemplate)
 	storedActor, err := w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
 		toUpdate.Status.State = ateapipb.ActorState_ACTOR_STATE_RESUMING
 		toUpdate.Status.WorkerAssignment = newAssignment
@@ -637,6 +638,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		return tele, err
 	}
 	egressGateway := w.egressGateway()
+	connectionAnchor := w.connectionAnchor(actorTemplate)
 
 	// The actor's declared limits ride the RPC down to the sandbox so it is sized
 	// to the actor (replacing the worker-pod downward-API approach).
@@ -655,6 +657,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 			Spec:                   workloadSpec,
 			ActorUid:               actor.GetMetadata().Uid,
 			EgressGateway:          egressGateway,
+			Anchor:                 connectionAnchor,
 			CpuMilli:               cpuMilli,
 			MemoryBytes:            memBytes,
 		}
@@ -712,6 +715,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 			GoldenSnapshotUri: src.GoldenSnapshotURI.String(),
 			ActorUid:          actor.GetMetadata().Uid,
 			EgressGateway:     egressGateway,
+			Anchor:            connectionAnchor,
 			CpuMilli:          cpuMilli,
 			MemoryBytes:       memBytes,
 		}
@@ -739,6 +743,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 			Spec:                   workloadSpec,
 			ActorUid:               actor.GetMetadata().Uid,
 			EgressGateway:          egressGateway,
+			Anchor:                 connectionAnchor,
 			CpuMilli:               cpuMilli,
 			MemoryBytes:            memBytes,
 		}

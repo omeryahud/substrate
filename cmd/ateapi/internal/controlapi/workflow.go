@@ -78,6 +78,7 @@ type ActorWorkflow struct {
 	storageClassLister   storagev1listers.StorageClassLister
 	instruments          *Instruments
 	egressGatewayAddress string
+	anchor               AnchorConfig
 	pluginRegistry       VolumePluginRegistry
 }
 
@@ -92,6 +93,7 @@ func NewActorWorkflow(
 	storageClassLister storagev1listers.StorageClassLister,
 	instruments *Instruments,
 	egressGatewayAddress string,
+	anchor AnchorConfig,
 	pluginRegistry VolumePluginRegistry,
 ) *ActorWorkflow {
 	return &ActorWorkflow{
@@ -105,6 +107,7 @@ func NewActorWorkflow(
 		storageClassLister:   storageClassLister,
 		instruments:          instruments,
 		egressGatewayAddress: egressGatewayAddress,
+		anchor:               anchor,
 		pluginRegistry:       pluginRegistry,
 	}
 }

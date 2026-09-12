@@ -78,6 +78,10 @@ var (
 	actorIDJWTPoolFile   = pflag.String("actor-id-jwt-pool", "", "The file that contains the serialized JWT authority pool for signing actor JWTs")
 	egressGatewayAddress = pflag.String("egress-gateway-address", "", "Address of the egress PEP. Empty disables tunneled egress.")
 
+	anchorIngressAddress = pflag.String("anchor-address", "", "host:port of the connection anchor's ingress listener. With --anchor-attach-address and --anchor-control-address, lets ActorTemplates annotated ate.dev/connection-policy=Preserve keep open TCP connections across suspend and resume. Empty disables anchoring.")
+	anchorAttachAddress  = pflag.String("anchor-attach-address", "", "host:port of the connection anchor's attach listener that workers tunnel actor frames to.")
+	anchorControlAddress = pflag.String("anchor-control-address", "", "host:port of the connection anchor's control listener that workers probe actor readiness through.")
+
 	actorIDCAPoolFile      = pflag.String("actor-id-ca-pool", "", "The file that contains the CA pool for signing actor JWTs")
 	podIdentityCACerts     = pflag.String("pod-identity-ca-certs", "", "The file that contains the pod-identity CA bundle, used both for verifying client certificates presented to the gRPC server and for verifying atelet serving certificates when dialing atelet. If empty, client-cert verification is disabled and atelet dials will fail.")
 	ateletClientCredBundle = pflag.String("atelet-client-cred-bundle", "", "Credential bundle presented as the client certificate when dialing atelet.")
@@ -193,7 +197,12 @@ func main() {
 
 	volPlugins := make(map[string]volume.VolumePluginControlPlane)
 	ateletDialer := controlapi.NewAteletDialer(workerPodInformer.GetIndexer(), ateletPodInformer.GetIndexer(), *ateletClientCredBundle, *podIdentityCACerts)
-	sm := controlapi.NewService(persistence, workerCache, actorTemplateLister, workerPoolLister, sandboxConfigLister, csiDriverConfigLister, storageClassLister, ateletDialer, instruments, *egressGatewayAddress, volPlugins)
+	anchorConfig := controlapi.AnchorConfig{
+		IngressAddress: *anchorIngressAddress,
+		AttachAddress:  *anchorAttachAddress,
+		ControlAddress: *anchorControlAddress,
+	}
+	sm := controlapi.NewService(persistence, workerCache, actorTemplateLister, workerPoolLister, sandboxConfigLister, csiDriverConfigLister, storageClassLister, ateletDialer, instruments, *egressGatewayAddress, anchorConfig, volPlugins)
 
 	actorIdentitySrv := actoridentity.New(actorIdentityJWTIssuer, *actorIDJWTPoolFile, *actorIDCAPoolFile, persistence, workerCache)
 	debugSrv := debugapi.NewService(persistence)

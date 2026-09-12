@@ -97,3 +97,43 @@ ${EXTERNAL_VOLUME_MOUNTS}
   - name: data
     durableDir: {}
 ${EXTERNAL_VOLUMES}
+
+---
+
+# The same actor with connection preservation opted in: its TCP connections
+# terminate in the connection anchor instead of on its worker, so an open
+# WebSocket survives Suspend and Resume. Shares the counter WorkerPool.
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: counter-preserve
+  namespace: ate-demo-counter
+  annotations:
+    ate.dev/connection-policy: Preserve
+spec:
+  containers:
+  - name: counter
+    image: ko://github.com/agent-substrate/substrate/demos/counter
+    command:
+    - /ko-app/counter
+    readyz:
+      httpGet:
+        path: /readyz
+        port: 80
+    volumeMounts:
+    - name: data
+      mountPath: /home/counter
+  resources:
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  workerSelector:
+    matchLabels:
+      workload: counter
+  snapshotsConfig:
+    onPause: Full
+    onCommit: Full
+    location: gs://${BUCKET_NAME}/ate-demo-counter/
+  volumes:
+  - name: data
+    durableDir: {}

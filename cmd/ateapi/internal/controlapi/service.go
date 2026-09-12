@@ -63,6 +63,7 @@ func NewService(
 	dialer *AteletDialer,
 	instruments *Instruments,
 	egressGatewayAddress string,
+	anchor AnchorConfig,
 	volumePlugins map[string]volume.VolumePluginControlPlane,
 ) *Service {
 	s := &Service{
@@ -76,7 +77,7 @@ func NewService(
 		instruments:           instruments,
 		volumePlugins:         volumePlugins,
 	}
-	s.actorWorkflow = NewActorWorkflow(persistence, workerCache, dialer, actorTemplateLister, workerPoolLister, sandboxConfigLister, storageClassLister, instruments, egressGatewayAddress, s)
+	s.actorWorkflow = NewActorWorkflow(persistence, workerCache, dialer, actorTemplateLister, workerPoolLister, sandboxConfigLister, storageClassLister, instruments, egressGatewayAddress, anchor, s)
 	return s
 }
 

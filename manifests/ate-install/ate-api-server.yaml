@@ -106,6 +106,13 @@ spec:
           # transparently redirected (nftables) into atunnel, which wraps it in
           # mTLS + HTTP CONNECT to the egress gateway.
           - --egress-gateway-address=atenet-egress.ate-system.svc:443
+          # The connection anchor. ActorTemplates annotated
+          # ate.dev/connection-policy=Preserve keep their open TCP connections
+          # across suspend and resume: their ingress goes to the anchor and
+          # their workers tunnel frames to it (see manifests/ate-install/atenet-anchor.yaml).
+          - --anchor-address=atenet-anchor.ate-system.svc:443
+          - --anchor-attach-address=atenet-anchor.ate-system.svc:445
+          - --anchor-control-address=atenet-anchor.ate-system.svc:446
           # Graceful shutdown knobs. The sum must fit within terminationGracePeriodSeconds.
           - --drain-delay=13s
           - --drain-timeout=15s

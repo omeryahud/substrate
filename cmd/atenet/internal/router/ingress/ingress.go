@@ -47,6 +47,33 @@ import (
 // defaultActorPort is the actor's port when a request names no other one.
 const defaultActorPort = 80
 
+// resolveAddress turns a host:port whose host may be a DNS name into an
+// ip:port the dataplane can dial directly. An IPv4 address is preferred.
+func resolveAddress(ctx context.Context, addr string) (string, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", err
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return addr, nil
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return "", err
+	}
+	if len(ips) == 0 {
+		return "", fmt.Errorf("no addresses for %q", host)
+	}
+	chosen := ips[0].IP
+	for _, ip := range ips {
+		if v4 := ip.IP.To4(); v4 != nil {
+			chosen = v4
+			break
+		}
+	}
+	return net.JoinHostPort(chosen.String(), port), nil
+}
+
 const (
 	// OriginalDstMetadataKey is the dynamic-metadata namespace carrying the
 	// resolved worker address and port. xds.go's ORIGINAL_DST cluster reads
@@ -156,6 +183,21 @@ func (h *Handler) HandleRequestHeaders(ctx context.Context, md *extproc.RequestM
 	// targetPort on the actor; the router's client cert comes from the
 	// ORIGINAL_DST cluster's upstream TLS context (xds.go).
 	targetAddr := net.JoinHostPort(workerIP, "443")
+
+	// An actor whose connections are preserved terminates them in the
+	// connection anchor, not on its worker, so ingress goes to the anchor. The
+	// anchor presents the same kind of pod identity a worker does, so the
+	// upstream TLS context is unchanged. ORIGINAL_DST needs an IP, so a Service
+	// name is resolved here.
+	if anchor := actor.GetStatus().GetWorkerAssignment().GetAnchorAddress(); anchor != "" {
+		resolved, err := resolveAddress(ctx, anchor)
+		if err != nil {
+			slog.ErrorContext(ctx, "Resolving connection anchor failed", slog.Any("actor", actorRef), slog.String("anchor", anchor), slog.Any("err", err))
+			return res, extproc.NewReqError(envoy_type.StatusCode_InternalServerError,
+				"actor %s routing failed", actorRef)
+		}
+		targetAddr = resolved
+	}
 
 	slog.InfoContext(ctx, "Route ok", slog.Any("actor", actorRef), slog.String("targetAddr", targetAddr))
 

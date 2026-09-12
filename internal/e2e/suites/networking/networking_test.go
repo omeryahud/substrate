@@ -105,6 +105,115 @@ func TestActorWebSocket(t *testing.T) {
 	t.Logf("WebSocket echo through ingress succeeded: %q", msg)
 }
 
+// counterPreserveFixture is the counter actor with connection preservation
+// opted in through its ActorTemplate annotation.
+func counterPreserveFixture() e2e.Fixture {
+	f := e2e.CounterFixture()
+	f.Name = "counter-preserve"
+	return f
+}
+
+// TestActorWebSocketSurvivesSuspend is the connection-preservation claim end
+// to end: a WebSocket opened through the router stays open while the Actor is
+// suspended and resumed, and carries data again afterwards on the same
+// connection. The Actor's TCP endpoint lives in the connection anchor, so the
+// worker it is suspended from and the worker it resumes on do not matter.
+func TestActorWebSocketSurvivesSuspend(t *testing.T) {
+	ctx := context.Background()
+	clients := e2e.GetClients()
+	actorName, _ := createAndResumeActor(t, ctx, "ws-preserve", counterPreserveFixture())
+	router := mustRouterClient(t, ctx)
+	defer router.Close()
+
+	actorRef := resources.ActorRef{Atespace: networkingAtespace, Name: actorName}
+	waitForRouteReady(t, "Actor readyz before WebSocket", func() (*http.Response, error) {
+		return router.Get(ctx, actorRef, "/readyz")
+	})
+
+	conn := dialWebSocketWithRetry(t, ctx, router, actorRef)
+	defer conn.Close()
+
+	echo := func(msg string) {
+		t.Helper()
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
+			t.Fatalf("WriteMessage(%q): %v", msg, err)
+		}
+		if err := conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+			t.Fatalf("SetReadDeadline: %v", err)
+		}
+		_, got, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("ReadMessage after %q: %v", msg, err)
+		}
+		if want := "echo: " + msg; string(got) != want {
+			t.Fatalf("echo = %q, want %q", got, want)
+		}
+	}
+	echo("before-suspend")
+
+	suspendNetworkingActor(ctx, t, clients, actorName)
+	waitForNetworkingActorState(ctx, t, clients, actorName, ateapipb.ActorState_ACTOR_STATE_SUSPENDED)
+	t.Logf("actor suspended with the WebSocket still open")
+
+	resumeNetworkingActor(ctx, t, clients, actorName)
+	waitForNetworkingActorState(ctx, t, clients, actorName, ateapipb.ActorState_ACTOR_STATE_RUNNING)
+	t.Logf("actor resumed")
+
+	echo("after-resume")
+	t.Logf("WebSocket survived suspend and resume: echo succeeded on the same connection")
+}
+
+func dialWebSocketWithRetry(t *testing.T, ctx context.Context, router *e2e.RouterClient, actorRef resources.ActorRef) *websocket.Conn {
+	t.Helper()
+	var lastErr error
+	for attempt := 0; attempt < 30; attempt++ {
+		c, resp, err := router.DialWebSocket(ctx, actorRef, "/ws")
+		if err == nil {
+			return c
+		}
+		lastErr = err
+		if resp != nil {
+			lastErr = fmt.Errorf("%w (handshake status %s)", err, resp.Status)
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("WebSocket upgrade through the router never succeeded: %v", lastErr)
+	return nil
+}
+
+func suspendNetworkingActor(ctx context.Context, t *testing.T, clients *e2e.Clients, name string) {
+	t.Helper()
+	if _, err := clients.SubstrateAPI.SuspendActor(ctx, &ateapipb.SuspendActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: networkingAtespace, Name: name},
+	}); err != nil {
+		t.Fatalf("failed to suspend actor %q: %v", name, err)
+	}
+}
+
+func resumeNetworkingActor(ctx context.Context, t *testing.T, clients *e2e.Clients, name string) {
+	t.Helper()
+	if _, err := clients.SubstrateAPI.ResumeActor(ctx, &ateapipb.ResumeActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: networkingAtespace, Name: name},
+	}); err != nil {
+		t.Fatalf("failed to resume actor %q: %v", name, err)
+	}
+}
+
+func waitForNetworkingActorState(ctx context.Context, t *testing.T, clients *e2e.Clients, name string, want ateapipb.ActorState) {
+	t.Helper()
+	deadline := time.Now().Add(120 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := clients.SubstrateAPI.GetActor(ctx, &ateapipb.GetActorRequest{
+			Actor: &ateapipb.ObjectRef{Atespace: networkingAtespace, Name: name},
+		})
+		if err == nil && resp.GetStatus().GetState() == want {
+			return
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatalf("timed out waiting for actor %q to reach %v", name, want)
+}
+
 // TestActorEgress exercises the full egress path. The Actor's outbound TCP
 // connection is transparently redirected by nftables into atunnel, wrapped in
 // mTLS with the Actor's own actor-identity certificate plus an HTTP CONNECT to
