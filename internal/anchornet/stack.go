@@ -23,10 +23,8 @@ package anchornet
 import (
 	"context"
 	"fmt"
-	"net"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -67,21 +65,10 @@ func NewStack(localIP string, prefixLen int) (*Stack, error) {
 		return nil, fmt.Errorf("anchornet: creating NIC: %s", err)
 	}
 
-	ip4 := net.ParseIP(localIP).To4()
-	if ip4 == nil {
-		return nil, fmt.Errorf("anchornet: %q is not an IPv4 address", localIP)
+	addr, err := addAddressAndDefaultRoute(s, localIP, prefixLen)
+	if err != nil {
+		return nil, err
 	}
-	addr := tcpip.AddrFromSlice(ip4)
-	protoAddr := tcpip.ProtocolAddress{
-		Protocol:          ipv4.ProtocolNumber,
-		AddressWithPrefix: tcpip.AddressWithPrefix{Address: addr, PrefixLen: prefixLen},
-	}
-	if err := s.AddProtocolAddress(nicID, protoAddr, stack.AddressProperties{}); err != nil {
-		return nil, fmt.Errorf("anchornet: adding address %s: %s", localIP, err)
-	}
-
-	s.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: nicID})
-
 	return &Stack{stack: s, link: link, addr: addr}, nil
 }
 

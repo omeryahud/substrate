@@ -34,7 +34,12 @@ import (
 // between the actor's link and the tunnel. Frames carry IP packets here because
 // the test stacks are IP-only; the worker path carries Ethernet.
 func Bridge(ctx context.Context, link *channel.Endpoint, tunnel io.ReadWriter) error {
-	fc := anchortun.NewFrameConn(tunnel)
+	return BridgeFrameConn(ctx, link, anchortun.NewFrameConn(tunnel))
+}
+
+// BridgeFrameConn is Bridge over an existing FrameConn, for a caller that has
+// already read the attach header from the stream.
+func BridgeFrameConn(ctx context.Context, link *channel.Endpoint, fc *anchortun.FrameConn) error {
 	errc := make(chan error, 2)
 
 	go func() {
