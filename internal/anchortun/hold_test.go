@@ -208,6 +208,24 @@ func TestConn_TTL(t *testing.T) {
 	}
 }
 
+// TestConn_TTLExpiresWhileWaking: a waking connection is TTL-eligible too, so a
+// resume that never lands still lets the hold be reclaimed.
+func TestConn_TTLExpiresWhileWaking(t *testing.T) {
+	clk := newClock()
+	c := NewConn(clk.now, true)
+	_ = c.Detach()
+	if wake, _ := c.DataArrived(); !wake {
+		t.Fatal("expected wake to reach waking state")
+	}
+	if c.State() != StateWaking {
+		t.Fatalf("state = %s, want waking", c.State())
+	}
+	clk.add(2 * time.Hour)
+	if !c.ExpiredTTL(time.Hour) {
+		t.Error("waking connection did not expire under a 1h TTL after 2h")
+	}
+}
+
 // TestConn_Unquiesce: a suspend that quiesced but did not detach can abort
 // back to attached; unquiesce is invalid from any other state.
 func TestConn_Unquiesce(t *testing.T) {
@@ -291,8 +309,12 @@ func TestErrInvalidTransition_Error(t *testing.T) {
 
 func TestNewConn_NilClockDefaults(t *testing.T) {
 	c := NewConn(nil, true)
+	if c.HeldFor() != 0 {
+		t.Errorf("HeldFor while attached = %s, want 0", c.HeldFor())
+	}
 	_ = c.Detach()
-	if c.HeldFor() < 0 {
-		t.Error("HeldFor with default clock returned negative")
+	held := c.HeldFor()
+	if held < 0 || held > time.Minute {
+		t.Errorf("HeldFor just after detach = %s, want a small non-negative duration", held)
 	}
 }

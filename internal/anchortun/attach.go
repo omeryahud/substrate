@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"regexp"
 
 	"github.com/agent-substrate/substrate/internal/resources"
@@ -102,6 +103,11 @@ func UnmarshalAttachHeader(b []byte) (AttachHeader, error) {
 	var h AttachHeader
 	if err := dec.Decode(&h); err != nil {
 		return AttachHeader{}, fmt.Errorf("anchortun: decoding attach header: %w", err)
+	}
+	// Reject trailing bytes after the object: a handshake carries exactly one
+	// header, and json.Decoder alone would accept a second object or garbage.
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
+		return AttachHeader{}, fmt.Errorf("anchortun: unexpected trailing data after attach header")
 	}
 	if err := h.Valid(); err != nil {
 		return AttachHeader{}, err

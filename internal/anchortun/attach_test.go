@@ -86,6 +86,8 @@ func TestUnmarshalAttachHeader_Rejects(t *testing.T) {
 		{"invalidFields", `{"atespace":"","actorName":"","workerPodUID":"","activationID":"","boot":""}`},
 		{"unknownBoot", `{"atespace":"a","actorName":"b","workerPodUID":"3fa9c1e2-0000-4444-8888-abcdefabcdef","activationID":"i","boot":"warm"}`},
 		{"unknownField", `{"atespace":"a","actorName":"b","workerPodUID":"3fa9c1e2-0000-4444-8888-abcdefabcdef","activationID":"i","boot":"restore","extra":"x"}`},
+		{"trailingGarbage", `{"atespace":"team-a","actorName":"chatbot-1","workerPodUID":"3fa9c1e2-0000-4444-8888-abcdefabcdef","activationID":"act-42","boot":"restore"}GARBAGE`},
+		{"trailingObject", `{"atespace":"team-a","actorName":"chatbot-1","workerPodUID":"3fa9c1e2-0000-4444-8888-abcdefabcdef","activationID":"act-42","boot":"restore"}{"atespace":"x"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := UnmarshalAttachHeader([]byte(tc.in)); err == nil {
