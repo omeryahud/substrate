@@ -124,6 +124,27 @@ func TestMakeCert(t *testing.T) {
 			},
 		},
 		{
+			// The connection anchor serves actor ingress to the router the way
+			// a worker's atunnel does, so its pod identity is a server cert too.
+			name:                 "connection anchor also serves",
+			namespace:            "ate-system",
+			podName:              "atenet-anchor-abcde",
+			serviceAccount:       "atenet-anchor",
+			maxExpirationSeconds: 86400,
+			wantLifetime:         24 * time.Hour,
+			wantURI:              "spiffe://cluster.local/ns/ate-system/sa/atenet-anchor",
+			wantEKUs:             []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+			wantIdentity: &substratex509.PodIdentity{
+				Namespace:          "ate-system",
+				ServiceAccountName: "atenet-anchor",
+				ServiceAccountUID:  "sa-uid-1",
+				PodName:            "atenet-anchor-abcde",
+				PodUID:             "pod-uid-1",
+				NodeName:           "node-1",
+				NodeUID:            "node-uid-1",
+			},
+		},
+		{
 			// Worker pods host the atunnel ingress server, so they serve TLS
 			// despite running as the actor namespace's default ServiceAccount.
 			name:                 "worker pod also serves",

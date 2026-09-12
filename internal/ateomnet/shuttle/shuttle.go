@@ -30,6 +30,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -129,11 +130,15 @@ func run(ctx context.Context, cfg Config, tlsCfg *tls.Config, sock *os.File, con
 // pump copies frames both ways until either side fails or ctx ends.
 func pump(ctx context.Context, sock *os.File, conn net.Conn) error {
 	fc := anchortun.NewFrameConn(conn)
+	rc, err := sock.SyscallConn()
+	if err != nil {
+		return fmt.Errorf("packet socket raw conn: %w", err)
+	}
 	errc := make(chan error, 2)
 	go func() {
 		buf := make([]byte, maxFrame)
 		for {
-			n, err := sock.Read(buf)
+			n, err := readFrame(rc, buf)
 			if err != nil {
 				errc <- fmt.Errorf("reading veth: %w", err)
 				return
@@ -166,6 +171,37 @@ func pump(ctx context.Context, sock *os.File, conn net.Conn) error {
 	case err := <-errc:
 		return err
 	}
+}
+
+// readFrame reads one frame the sandbox sent. A packet socket also sees the
+// frames this process transmits on the interface (PACKET_OUTGOING); those are
+// the anchor's own frames on their way to the sandbox and must not be echoed
+// back to it, so they are skipped. The read goes through the runtime poller,
+// so closing the socket unblocks it.
+func readFrame(rc syscall.RawConn, buf []byte) (int, error) {
+	var n int
+	var rerr error
+	err := rc.Read(func(fd uintptr) bool {
+		for {
+			nn, from, e := unix.Recvfrom(int(fd), buf, unix.MSG_DONTWAIT)
+			if e == unix.EAGAIN || e == unix.EWOULDBLOCK {
+				return false
+			}
+			if e != nil {
+				rerr = e
+				return true
+			}
+			if sll, ok := from.(*unix.SockaddrLinklayer); ok && sll.Pkttype == unix.PACKET_OUTGOING {
+				continue
+			}
+			n = nn
+			return true
+		}
+	})
+	if err != nil {
+		return 0, err
+	}
+	return n, rerr
 }
 
 // dialAndAttach opens the mTLS tunnel and sends the attach header as its

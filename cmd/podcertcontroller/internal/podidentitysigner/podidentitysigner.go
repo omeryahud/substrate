@@ -46,6 +46,9 @@ const CTBPrefix = "podidentity.podcert.ate.dev:identity:"
 const (
 	ateletNamespace      = "ate-system"
 	ateletServiceAccount = "atelet"
+	// The connection anchor serves actor ingress to the router the way a
+	// worker's atunnel does, so it needs the serverAuth EKU too.
+	anchorServiceAccount = "atenet-anchor"
 )
 
 // workerPoolLabel marks pods created by atecontroller for a WorkerPool. Worker
@@ -59,7 +62,8 @@ func extKeyUsages(pod *corev1.Pod, namespace, serviceAccount string) []x509.ExtK
 	usages := []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
 	_, isWorker := pod.ObjectMeta.Labels[workerPoolLabel]
 	isAtelet := namespace == ateletNamespace && serviceAccount == ateletServiceAccount
-	if isAtelet || isWorker {
+	isAnchor := namespace == ateletNamespace && serviceAccount == anchorServiceAccount
+	if isAtelet || isWorker || isAnchor {
 		usages = append(usages, x509.ExtKeyUsageServerAuth)
 	}
 	return usages

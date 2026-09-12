@@ -38,6 +38,20 @@ type runsc struct {
 	// size is the actor's declared limits, supplied on the RunWorkload /
 	// RestoreWorkload RPC; ensureContainerCgroupsPath writes it into the OCI spec.
 	size sizing.SandboxSize
+	// anchored turns segmentation offload off. With host GSO on, runsc leaves
+	// TCP checksums for hardware to fill, which never happens on a veth, so
+	// the anchor would drop every frame the shuttle carries to it.
+	anchored bool
+}
+
+// networkArgs are the runsc flags that shape the sandbox network. They apply
+// on start and on restore, because restore configures the network again.
+func (r *runsc) networkArgs() []string {
+	args := []string{"-allow-connected-on-save"}
+	if r.anchored {
+		args = append(args, "--gso=false", "--software-gso=false")
+	}
+	return args
 }
 
 // nvproxyGlobalArgs returns the runsc global flags for GPU sandboxes, enabling
@@ -158,9 +172,9 @@ func (r *runsc) cmdStart(ctx context.Context, out io.Writer, containerName strin
 		// "-debug-to-user-log",
 		// "-log-packets",
 		// "-strace",
-		"-allow-connected-on-save",
 		"-root", ateompath.RunSCStateDir(r.actorUID),
 	}
+	startArgs = append(startArgs, r.networkArgs()...)
 	startArgs = append(startArgs, "start", containerName)
 	cmd := exec.CommandContext(ctx, r.path, startArgs...)
 	cmd.Stdout = out
@@ -268,6 +282,7 @@ func (r *runsc) cmdRestore(ctx context.Context, out io.Writer, containerName, ch
 		"--cpu-num-from-quota",
 	}
 	restoreArgs = append(restoreArgs, nvproxyGlobalArgs()...)
+	restoreArgs = append(restoreArgs, r.networkArgs()...)
 	restoreArgs = append(restoreArgs,
 		"restore",
 		"-bundle", ateompath.OCIBundlePath(r.actorUID, containerName),
