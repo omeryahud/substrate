@@ -37,6 +37,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -48,6 +49,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/ateomnet/actoraddr"
 	"github.com/agent-substrate/substrate/internal/atunnel"
 	"github.com/agent-substrate/substrate/internal/resources"
+	"github.com/agent-substrate/substrate/internal/serverboot"
 )
 
 const (
@@ -55,6 +57,10 @@ const (
 	spiffePrefix = "spiffe://"
 	// probeTimeout bounds one readiness probe through the actor's stack.
 	probeTimeout = 5 * time.Second
+	// headerTimeout bounds how long a new tunnel may take to send its header.
+	headerTimeout = 10 * time.Second
+	// maxSweepInterval bounds how long an expired hold outlives its TTL.
+	maxSweepInterval = time.Minute
 )
 
 // Config configures an Anchor.
@@ -62,6 +68,8 @@ type Config struct {
 	IngressListen string
 	AttachListen  string
 	ControlListen string
+	// MetricsAddr serves Prometheus metrics and the health endpoints.
+	MetricsAddr string
 	// IngressCredentialBundlePath is the pod-identity certificate the ingress
 	// listener presents; the router validates it by SPIFFE prefix, as it does
 	// a worker's atunnel.
@@ -74,31 +82,54 @@ type Config struct {
 	TrustBundlePath string
 	// RouterClientID is the only identity allowed on the ingress listener.
 	RouterClientID string
+	// HoldTTL drops an actor's stack, resetting its held connections, when no
+	// worker has reattached for this long. Zero holds forever.
+	HoldTTL time.Duration
+	// LogFrames logs one line per frame at debug level.
+	LogFrames bool
 }
 
 // Anchor holds one network stack per actor and the listeners that reach them.
 type Anchor struct {
 	cfg       Config
 	clientCAs *x509.CertPool
-	proxy     *httputil.ReverseProxy
+	metrics   *Metrics
+	now       func() time.Time
 
 	mu     sync.Mutex
 	actors map[resources.ActorRef]*actorEntry
 }
 
-// actorEntry is one actor's stack plus its current tunnel, if attached.
+// actorEntry is one actor's stack, the proxy into it, and its current tunnel.
 type actorEntry struct {
-	ref resources.ActorRef
+	ref      resources.ActorRef
+	actorUID string
+	stack    *anchornet.Stack
+	// transport pools connections into this stack only. Every actor has the
+	// same address inside its own stack, so a pool shared across actors would
+	// hand one actor's connection to another.
+	transport *http.Transport
+	proxy     *httputil.ReverseProxy
+
+	framesToActor   atomic.Int64
+	framesFromActor atomic.Int64
 
 	mu           sync.Mutex
-	stack        *anchornet.Stack
 	detach       context.CancelFunc
 	activationID string
+	// heldSince is when the last tunnel went away; zero while attached.
+	heldSince time.Time
 }
 
-type entryKey struct{}
+// ingressCall is the per-request state the proxy callbacks need.
+type ingressCall struct {
+	entry  *actorEntry
+	failed atomic.Bool
+}
 
-// New validates the TLS material and prepares the ingress proxy.
+type ingressCallKey struct{}
+
+// New validates the TLS material and creates the instruments.
 func New(cfg Config) (*Anchor, error) {
 	if cfg.CredentialBundlePath == "" || cfg.IngressCredentialBundlePath == "" || cfg.TrustBundlePath == "" {
 		return nil, errors.New("anchor: credential and trust bundle paths are required")
@@ -119,31 +150,11 @@ func New(cfg Config) (*Anchor, error) {
 	if !pool.AppendCertsFromPEM(trustPEM) {
 		return nil, fmt.Errorf("anchor: trust bundle %q contains no certificates", cfg.TrustBundlePath)
 	}
-
-	a := &Anchor{cfg: cfg, clientCAs: pool, actors: map[resources.ActorRef]*actorEntry{}}
-	a.proxy = &httputil.ReverseProxy{
-		Rewrite: func(pr *httputil.ProxyRequest) {
-			port := pr.In.Header.Get(atunnel.TargetPortHeader)
-			pr.Out.Header.Del(atunnel.TargetPortHeader)
-			p, ok := atunnel.ParsePort(port)
-			if !ok {
-				p = 80
-			}
-			pr.SetURL(&url.URL{Scheme: "http", Host: net.JoinHostPort(actoraddr.ActorVethIP, strconv.Itoa(p))})
-			pr.Out.Host = pr.In.Host
-			pr.SetXForwarded()
-		},
-		Transport: &http.Transport{
-			DialContext:         a.dialActor,
-			MaxIdleConnsPerHost: 8,
-			IdleConnTimeout:     90 * time.Second,
-		},
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			slog.WarnContext(r.Context(), "anchor upstream request failed", slog.Any("err", err))
-			http.Error(w, "bad gateway", http.StatusBadGateway)
-		},
+	metrics, err := NewMetrics()
+	if err != nil {
+		return nil, err
 	}
-	return a, nil
+	return &Anchor{cfg: cfg, clientCAs: pool, metrics: metrics, now: time.Now, actors: map[resources.ActorRef]*actorEntry{}}, nil
 }
 
 func loadCredentialBundle(path string) (*tls.Certificate, error) {
@@ -199,7 +210,7 @@ func verifyWorkload(uris []*url.URL) error {
 	return errors.New("anchor: client has no workload identity")
 }
 
-// Run serves the three listeners until ctx is canceled.
+// Run serves the listeners and sweeps expired holds until ctx is canceled.
 func (a *Anchor) Run(ctx context.Context) error {
 	ingressLis, err := net.Listen("tcp", a.cfg.IngressListen)
 	if err != nil {
@@ -214,20 +225,35 @@ func (a *Anchor) Run(ctx context.Context) error {
 		return fmt.Errorf("anchor: control listen: %w", err)
 	}
 
-	ingressSrv := &http.Server{Handler: a, TLSConfig: a.tlsConfig(a.cfg.IngressCredentialBundlePath, a.verifyRouter), ReadHeaderTimeout: 10 * time.Second}
+	if a.cfg.MetricsAddr != "" {
+		mp, err := serverboot.InitMetrics(ctx, ServiceName)
+		if err != nil {
+			return fmt.Errorf("anchor: initializing metrics: %w", err)
+		}
+		defer serverboot.ShutdownProvider("MeterProvider", mp.Shutdown)
+		go serverboot.StartMetricsServer(ctx, serverboot.MetricsServerOptions{
+			Addr:          a.cfg.MetricsAddr,
+			Readiness:     &serverboot.Readiness{},
+			EnableHealthz: true,
+		})
+	}
+
+	ingressSrv := &http.Server{Handler: a, TLSConfig: a.tlsConfig(a.cfg.IngressCredentialBundlePath, a.verifyRouter), ReadHeaderTimeout: headerTimeout}
 	controlMux := http.NewServeMux()
 	controlMux.HandleFunc("/probe", a.serveProbe)
-	controlSrv := &http.Server{Handler: controlMux, TLSConfig: a.tlsConfig(a.cfg.CredentialBundlePath, verifyWorkload), ReadHeaderTimeout: 10 * time.Second}
+	controlSrv := &http.Server{Handler: controlMux, TLSConfig: a.tlsConfig(a.cfg.CredentialBundlePath, verifyWorkload), ReadHeaderTimeout: headerTimeout}
 	attachTLS := tls.NewListener(attachLis, a.tlsConfig(a.cfg.CredentialBundlePath, verifyWorkload))
 
 	errc := make(chan error, 3)
 	go func() { errc <- ingressSrv.ServeTLS(ingressLis, "", "") }()
 	go func() { errc <- controlSrv.ServeTLS(controlLis, "", "") }()
 	go func() { errc <- a.serveAttach(ctx, attachTLS) }()
+	go a.sweepLoop(ctx)
 	slog.InfoContext(ctx, "anchor serving",
 		slog.String("ingress", a.cfg.IngressListen),
 		slog.String("attach", a.cfg.AttachListen),
-		slog.String("control", a.cfg.ControlListen))
+		slog.String("control", a.cfg.ControlListen),
+		slog.Duration("holdTTL", a.cfg.HoldTTL))
 
 	select {
 	case <-ctx.Done():
@@ -261,24 +287,28 @@ func (a *Anchor) handleAttach(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	fc := anchortun.NewFrameConn(conn)
 
-	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(headerTimeout))
 	first, err := fc.ReadFrame()
 	if err != nil {
 		slog.WarnContext(ctx, "anchor attach: reading header", slog.Any("err", err))
+		a.metrics.recordAttach(ctx, outcomeBadHeader, "")
 		return
 	}
 	hdr, err := anchortun.UnmarshalAttachHeader(first)
 	if err != nil {
 		slog.WarnContext(ctx, "anchor attach: bad header", slog.Any("err", err))
+		a.metrics.recordAttach(ctx, outcomeBadHeader, "")
 		return
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 
-	entry, err := a.getOrCreate(hdr.Ref(), hdr.Boot == anchortun.BootFresh)
+	entry, err := a.getOrCreate(ctx, hdr.Ref(), hdr.ActorUID, hdr.Boot == anchortun.BootFresh)
 	if err != nil {
 		slog.ErrorContext(ctx, "anchor attach: creating stack", slog.Any("actor", hdr.Ref()), slog.Any("err", err))
+		a.metrics.recordAttach(ctx, outcomeStackError, string(hdr.Boot))
 		return
 	}
+	a.metrics.recordAttach(ctx, outcomeAttached, string(hdr.Boot))
 
 	tunnelCtx, cancel := context.WithCancel(ctx)
 	entry.mu.Lock()
@@ -287,52 +317,144 @@ func (a *Anchor) handleAttach(ctx context.Context, conn net.Conn) {
 	}
 	entry.detach = cancel
 	entry.activationID = hdr.ActivationID
+	entry.heldSince = time.Time{}
 	entry.mu.Unlock()
+	a.metrics.addTunnels(ctx, 1)
 
 	slog.InfoContext(ctx, "anchor: actor attached",
 		slog.Any("actor", hdr.Ref()),
+		slog.String("actorUID", hdr.ActorUID),
 		slog.String("worker", hdr.WorkerPodUID),
 		slog.String("activation", hdr.ActivationID),
-		slog.String("boot", string(hdr.Boot)))
+		slog.String("boot", string(hdr.Boot)),
+		slog.Any("neighbors", summarizeNeighbors(entry.stack.Neighbors())))
+	entry.stack.ForgetNeighbors()
 
-	err = anchornet.BridgeFrameConn(tunnelCtx, entry.stack.Link(), fc)
+	err = anchornet.BridgeFrameConn(tunnelCtx, entry.stack.Link(), fc, a.frameHook(ctx, entry))
 
 	entry.mu.Lock()
 	// Only clear the tunnel we own; a newer attach may have replaced it.
 	if entry.activationID == hdr.ActivationID {
 		entry.detach = nil
+		entry.heldSince = a.clock()
 	}
 	entry.mu.Unlock()
 	cancel()
+	a.metrics.addTunnels(ctx, -1)
 	slog.InfoContext(ctx, "anchor: actor detached, connections held",
-		slog.Any("actor", hdr.Ref()), slog.Any("err", err))
+		slog.Any("actor", hdr.Ref()),
+		slog.String("activation", hdr.ActivationID),
+		slog.Int64("framesToActor", entry.framesToActor.Load()),
+		slog.Int64("framesFromActor", entry.framesFromActor.Load()),
+		slog.Any("neighbors", summarizeNeighbors(entry.stack.Neighbors())),
+		slog.Any("err", err))
 }
 
-// getOrCreate returns the actor's stack, creating it on first attach. A fresh
-// boot discards a held stack, because held connections cannot belong to a new
-// process.
-func (a *Anchor) getOrCreate(ref resources.ActorRef, fresh bool) (*actorEntry, error) {
+// frameHook counts the frames a tunnel moves and logs them when asked.
+func (a *Anchor) frameHook(ctx context.Context, entry *actorEntry) anchornet.FrameHook {
+	return func(outbound bool, frame []byte) {
+		direction := directionFromActor
+		if outbound {
+			direction = directionToActor
+			entry.framesToActor.Add(1)
+		} else {
+			entry.framesFromActor.Add(1)
+		}
+		a.metrics.recordFrame(ctx, direction, len(frame))
+		if a.cfg.LogFrames {
+			slog.DebugContext(ctx, "anchor frame",
+				slog.Any("actor", entry.ref),
+				slog.String("direction", direction),
+				slog.String("frame", summarizeFrame(frame)))
+		}
+	}
+}
+
+// getOrCreate returns the actor's stack, creating it on first attach. A held
+// stack is reused only for a restore of the same actor UID: a fresh boot is a
+// new process, and a new UID is a new actor that reused the name, so in both
+// cases the held connections cannot belong to it and the stack is replaced.
+func (a *Anchor) getOrCreate(ctx context.Context, ref resources.ActorRef, actorUID string, fresh bool) (*actorEntry, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if e, ok := a.actors[ref]; ok {
-		if !fresh {
+		if !fresh && e.actorUID == actorUID {
 			return e, nil
 		}
-		e.mu.Lock()
-		if e.detach != nil {
-			e.detach()
-		}
-		e.mu.Unlock()
-		e.stack.Close()
-		delete(a.actors, ref)
+		a.dropLocked(ctx, e)
 	}
+	e, err := a.newEntry(ref, actorUID)
+	if err != nil {
+		return nil, err
+	}
+	a.actors[ref] = e
+	a.metrics.addActors(ctx, 1)
+	return e, nil
+}
+
+// dropLocked detaches, closes, and forgets an actor's stack. Closing the stack
+// resets its held connections toward the router side. Caller holds a.mu.
+func (a *Anchor) dropLocked(ctx context.Context, e *actorEntry) {
+	e.mu.Lock()
+	if e.detach != nil {
+		e.detach()
+	}
+	e.mu.Unlock()
+	e.transport.CloseIdleConnections()
+	e.stack.Close()
+	delete(a.actors, e.ref)
+	a.metrics.addActors(ctx, -1)
+}
+
+func (a *Anchor) newEntry(ref resources.ActorRef, actorUID string) (*actorEntry, error) {
 	st, err := anchornet.NewEthernetStack(actoraddr.ActorVethGateway, actoraddr.PrefixLen, actoraddr.GatewayMAC)
 	if err != nil {
 		return nil, err
 	}
-	e := &actorEntry{ref: ref, stack: st}
-	a.actors[ref] = e
+	e := &actorEntry{ref: ref, actorUID: actorUID, stack: st}
+	e.transport = &http.Transport{
+		DialContext: func(ctx context.Context, _ string, addr string) (net.Conn, error) {
+			return dialInStack(ctx, st, addr)
+		},
+		MaxIdleConnsPerHost: 8,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	e.proxy = &httputil.ReverseProxy{
+		Rewrite:      rewriteToActor,
+		Transport:    e.transport,
+		ErrorHandler: upstreamError,
+	}
 	return e, nil
+}
+
+// rewriteToActor points the request at the actor's address inside its stack,
+// on the port the router asked for.
+func rewriteToActor(pr *httputil.ProxyRequest) {
+	port := pr.In.Header.Get(atunnel.TargetPortHeader)
+	pr.Out.Header.Del(atunnel.TargetPortHeader)
+	p, ok := atunnel.ParsePort(port)
+	if !ok {
+		p = 80
+	}
+	pr.SetURL(&url.URL{Scheme: "http", Host: net.JoinHostPort(actoraddr.ActorVethIP, strconv.Itoa(p))})
+	pr.Out.Host = pr.In.Host
+	pr.SetXForwarded()
+}
+
+func upstreamError(w http.ResponseWriter, r *http.Request, err error) {
+	if call, _ := r.Context().Value(ingressCallKey{}).(*ingressCall); call != nil {
+		call.failed.Store(true)
+	}
+	slog.WarnContext(r.Context(), "anchor upstream request failed", slog.Any("err", err))
+	http.Error(w, "bad gateway", http.StatusBadGateway)
+}
+
+// clock is the injectable time source; nil means the wall clock.
+func (a *Anchor) clock() time.Time {
+	if a.now == nil {
+		return time.Now()
+	}
+	return a.now()
 }
 
 func (a *Anchor) lookup(ref resources.ActorRef) *actorEntry {
@@ -341,17 +463,62 @@ func (a *Anchor) lookup(ref resources.ActorRef) *actorEntry {
 	return a.actors[ref]
 }
 
+// sweepLoop drops stacks held longer than the hold TTL.
+func (a *Anchor) sweepLoop(ctx context.Context) {
+	if a.cfg.HoldTTL <= 0 {
+		return
+	}
+	interval := min(a.cfg.HoldTTL/10, maxSweepInterval)
+	if interval < time.Second {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.sweepHeld(ctx)
+		}
+	}
+}
+
+// sweepHeld drops every stack whose hold has outlived the TTL and returns how
+// many it dropped.
+func (a *Anchor) sweepHeld(ctx context.Context) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	cutoff := a.clock().Add(-a.cfg.HoldTTL)
+	dropped := 0
+	for _, e := range a.actors {
+		e.mu.Lock()
+		expired := e.detach == nil && !e.heldSince.IsZero() && e.heldSince.Before(cutoff)
+		e.mu.Unlock()
+		if !expired {
+			continue
+		}
+		slog.InfoContext(ctx, "anchor: hold expired, resetting connections",
+			slog.Any("actor", e.ref), slog.String("actorUID", e.actorUID))
+		a.dropLocked(ctx, e)
+		a.metrics.recordHoldExpired(ctx)
+		dropped++
+	}
+	return dropped
+}
+
 // ServeHTTP is the ingress path: the router's request for an actor is proxied
 // into that actor's stack, upgrades included.
 func (a *Anchor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := a.clock()
 	ref, ok := actorRefFromRequest(r)
 	if !ok {
-		reject(w)
+		a.reject(w, r, start)
 		return
 	}
 	entry := a.lookup(ref)
 	if entry == nil {
-		reject(w)
+		a.reject(w, r, start)
 		return
 	}
 	actorHost := r.Header.Get(atunnel.OriginalHostHeader)
@@ -360,8 +527,14 @@ func (a *Anchor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Header.Del(atunnel.OriginalHostHeader)
 	r.Host = actorHost
-	ctx := context.WithValue(r.Context(), entryKey{}, entry)
-	a.proxy.ServeHTTP(w, r.WithContext(ctx))
+	call := &ingressCall{entry: entry}
+	ctx := context.WithValue(r.Context(), ingressCallKey{}, call)
+	entry.proxy.ServeHTTP(w, r.WithContext(ctx))
+	outcome := outcomeProxied
+	if call.failed.Load() {
+		outcome = outcomeUpstreamError
+	}
+	a.metrics.recordIngress(r.Context(), a.clock().Sub(start), outcome)
 }
 
 // actorRefFromRequest resolves the actor a request is for, from the router's
@@ -386,18 +559,12 @@ func actorRefFromRequest(r *http.Request) (resources.ActorRef, bool) {
 	return ref, true
 }
 
-func reject(w http.ResponseWriter) {
+// reject answers a request for an actor this anchor does not hold, with the
+// header the router treats as a stale assignment.
+func (a *Anchor) reject(w http.ResponseWriter, r *http.Request, start time.Time) {
 	w.Header().Set(atunnel.StaleAssignmentHeader, "true")
 	http.Error(w, "misdirected request", http.StatusMisdirectedRequest)
-}
-
-// dialActor opens a TCP connection to the actor inside its own stack.
-func (a *Anchor) dialActor(ctx context.Context, _ string, addr string) (net.Conn, error) {
-	entry, _ := ctx.Value(entryKey{}).(*actorEntry)
-	if entry == nil {
-		return nil, errors.New("anchor: no actor for this request")
-	}
-	return dialInStack(ctx, entry.stack, addr)
+	a.metrics.recordIngress(r.Context(), a.clock().Sub(start), outcomeMisdirected)
 }
 
 func dialInStack(ctx context.Context, st *anchornet.Stack, addr string) (net.Conn, error) {
@@ -417,6 +584,10 @@ func dialInStack(ctx context.Context, st *anchornet.Stack, addr string) (net.Con
 // serveProbe runs one readiness GET inside an actor's stack for ateom, which
 // has no address on the link once the actor is anchored.
 func (a *Anchor) serveProbe(w http.ResponseWriter, r *http.Request) {
+	start := a.clock()
+	outcome := outcomeBadRequest
+	defer func() { a.metrics.recordProbe(r.Context(), a.clock().Sub(start), outcome) }()
+
 	q := r.URL.Query()
 	ref := resources.ActorRef{Atespace: q.Get("atespace"), Name: q.Get("actor")}
 	port, ok := atunnel.ParsePort(q.Get("port"))
@@ -430,6 +601,7 @@ func (a *Anchor) serveProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	entry := a.lookup(ref)
 	if entry == nil {
+		outcome = outcomeNotAttached
 		http.Error(w, "actor not attached", http.StatusNotFound)
 		return
 	}
@@ -449,10 +621,15 @@ func (a *Anchor) serveProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		outcome = outcomeFailed
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
+	outcome = outcomeNotReady
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		outcome = outcomeOK
+	}
 	w.WriteHeader(resp.StatusCode)
 }

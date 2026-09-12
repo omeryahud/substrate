@@ -34,19 +34,23 @@ import (
 // between the actor's link and the tunnel. Frames carry IP packets here because
 // the test stacks are IP-only; the worker path carries Ethernet.
 func Bridge(ctx context.Context, link *channel.Endpoint, tunnel io.ReadWriter) error {
-	return BridgeFrameConn(ctx, link, anchortun.NewFrameConn(tunnel))
+	return BridgeFrameConn(ctx, link, anchortun.NewFrameConn(tunnel), nil)
 }
 
+// FrameHook observes every frame a bridge moves. outbound is true for frames
+// the stack sends toward the tunnel. The frame is only valid during the call.
+type FrameHook func(outbound bool, frame []byte)
+
 // BridgeFrameConn is Bridge over an existing FrameConn, for a caller that has
-// already read the attach header from the stream.
-func BridgeFrameConn(ctx context.Context, link *channel.Endpoint, fc *anchortun.FrameConn) error {
+// already read the attach header from the stream. hook may be nil.
+func BridgeFrameConn(ctx context.Context, link *channel.Endpoint, fc *anchortun.FrameConn, hook FrameHook) error {
 	errc := make(chan error, 2)
 
 	go func() {
-		errc <- writeOutbound(ctx, link, fc)
+		errc <- writeOutbound(ctx, link, fc, hook)
 	}()
 	go func() {
-		errc <- readInbound(link, fc)
+		errc <- readInbound(link, fc, hook)
 	}()
 
 	err := <-errc
@@ -58,7 +62,7 @@ func BridgeFrameConn(ctx context.Context, link *channel.Endpoint, fc *anchortun.
 
 // writeOutbound serializes each outbound packet the stack emits into a tunnel
 // frame.
-func writeOutbound(ctx context.Context, link *channel.Endpoint, fc *anchortun.FrameConn) error {
+func writeOutbound(ctx context.Context, link *channel.Endpoint, fc *anchortun.FrameConn, hook FrameHook) error {
 	for {
 		pkt := link.ReadContext(ctx)
 		if pkt == nil {
@@ -68,6 +72,9 @@ func writeOutbound(ctx context.Context, link *channel.Endpoint, fc *anchortun.Fr
 		frame := buf.Flatten()
 		buf.Release()
 		pkt.DecRef()
+		if hook != nil {
+			hook(true, frame)
+		}
 		if err := fc.WriteFrame(frame); err != nil {
 			return err
 		}
@@ -75,11 +82,14 @@ func writeOutbound(ctx context.Context, link *channel.Endpoint, fc *anchortun.Fr
 }
 
 // readInbound injects each tunnel frame into the stack as an inbound packet.
-func readInbound(link *channel.Endpoint, fc *anchortun.FrameConn) error {
+func readInbound(link *channel.Endpoint, fc *anchortun.FrameConn, hook FrameHook) error {
 	for {
 		frame, err := fc.ReadFrame()
 		if err != nil {
 			return err
+		}
+		if hook != nil {
+			hook(false, frame)
 		}
 		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 			Payload: buffer.MakeWithData(frame),

@@ -27,10 +27,10 @@ import (
 // workerPodUIDRE matches a Kubernetes pod UID, which is a UUID.
 var workerPodUIDRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
-// activationIDRE bounds the activation id ateapi mints: a short token of safe
+// tokenRE bounds the actor UID and the activation id: short tokens of safe
 // characters. The bound stops an untrusted shuttle from supplying an
 // arbitrarily long or odd value.
-var activationIDRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+var tokenRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // BootKind tells the anchor how to treat an actor's held connections when a
 // worker attaches.
@@ -50,8 +50,11 @@ const (
 // tunnel to the right per-actor stack and reject a stale or misdirected
 // worker.
 type AttachHeader struct {
-	Atespace     string   `json:"atespace"`
-	ActorName    string   `json:"actorName"`
+	Atespace  string `json:"atespace"`
+	ActorName string `json:"actorName"`
+	// ActorUID tells one actor from a later one with the same name, so held
+	// connections of a deleted actor are never handed to its namesake.
+	ActorUID     string   `json:"actorUID"`
 	WorkerPodUID string   `json:"workerPodUID"`
 	ActivationID string   `json:"activationID"`
 	Boot         BootKind `json:"boot"`
@@ -69,10 +72,13 @@ func (h AttachHeader) Valid() error {
 	if !resources.IsValidResourceName(h.ActorName) {
 		return fmt.Errorf("anchortun: invalid actor name %q", h.ActorName)
 	}
+	if !tokenRE.MatchString(h.ActorUID) {
+		return fmt.Errorf("anchortun: invalid actor UID %q", h.ActorUID)
+	}
 	if !workerPodUIDRE.MatchString(h.WorkerPodUID) {
 		return fmt.Errorf("anchortun: invalid worker pod UID %q", h.WorkerPodUID)
 	}
-	if !activationIDRE.MatchString(h.ActivationID) {
+	if !tokenRE.MatchString(h.ActivationID) {
 		return fmt.Errorf("anchortun: invalid activation ID %q", h.ActivationID)
 	}
 	if h.Boot != BootRestore && h.Boot != BootFresh {

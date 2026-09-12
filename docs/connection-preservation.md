@@ -480,9 +480,11 @@ Actor certificate, now from an anchor pod.
   tunnel with an old id is closed when a newer attach arrives. Without this,
   neither end can tell that the tunnel it holds belongs to a previous
   incarnation.
-- **Attach header.** Actor reference, worker pod UID, activation id, and a
-  boot kind: `restore` (keep held connections) or `fresh` (this is
-  `RunWorkload`; drop held connections, they cannot match a new process).
+- **Attach header.** Actor reference, Actor UID, worker pod UID, activation
+  id, and a boot kind: `restore` (keep held connections) or `fresh` (this is
+  `RunWorkload`; drop held connections, they cannot match a new process). A
+  `restore` for a different Actor UID is treated as `fresh`: a new Actor that
+  reused a deleted Actor's name must never inherit its held connections.
 - **Framing.** Length-prefixed Ethernet frames on a bidirectional stream. The
   first transport is HTTP/2 CONNECT over the existing mTLS plumbing, because
   every piece of it already exists in `atunnel`. TCP-in-TCP is acceptable on a
@@ -871,7 +873,9 @@ when an anchor is configured, which it knows from the activation.
 | `--anchor-enabled` (ateapi) | `false` | Allow `connectionPolicy: Preserve` templates. |
 | `--held-connections-max` (anchor) | `65536` | Total held connections per anchor pod. |
 | `--held-buffer-bytes-max` (anchor) | `1 GiB` | Total bytes buffered for held connections. |
-| `--hold-ttl` (anchor) | `0` (none) | Reset connections held longer than this. |
+| `--hold-ttl` (anchor) | `24h` | Reset connections held longer than this and drop the Actor's stack. Until `Release` exists this is the only way a deleted Actor's stack is reclaimed, so the default is finite. `0` holds forever. |
+| `--metrics-listen-addr` (anchor) | `:9090` | Prometheus metrics, `/readyz`, `/healthz`. |
+| `--log-frames` (anchor) | `false` | Log one line per Ethernet frame at debug level. |
 | `--quiesce-timeout` (ateapi) | `250ms` | Bound on the Quiesce step. |
 | `--wake-rate-limit` (anchor) | `1/s` per Actor | Cap on wake attempts per Actor. |
 | `--route-timeout` (router) | `10s` | Existing. Raise for templates whose in-flight requests may span a suspend. |

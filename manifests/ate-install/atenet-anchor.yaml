@@ -45,6 +45,9 @@ spec:
     metadata:
       labels:
         app: atenet-anchor
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
     spec:
       serviceAccountName: atenet-anchor
       containers:
@@ -58,6 +61,8 @@ spec:
         - --ingress-credential-bundle=/run/podidentity.podcert.ate.dev/credential-bundle.pem
         - --credential-bundle=/run/servicedns.podcert.ate.dev/credential-bundle.pem
         - --trust-bundle=/run/podidentity.podcert.ate.dev/trust-bundle.pem
+        - --metrics-listen-addr=:9090
+        - --hold-ttl=24h
         ports:
         - name: https
           containerPort: 443
@@ -65,6 +70,19 @@ spec:
           containerPort: 445
         - name: control
           containerPort: 446
+        - name: metrics
+          containerPort: 9090
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 9090
+          periodSeconds: 2
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9090
+          initialDelaySeconds: 10
+          periodSeconds: 10
         volumeMounts:
         - name: servicedns
           mountPath: /run/servicedns.podcert.ate.dev

@@ -82,6 +82,21 @@ func (s *Stack) Addr() tcpip.Address { return s.addr }
 // Link returns the channel link endpoint whose frames the tunnel carries.
 func (s *Stack) Link() *channel.Endpoint { return s.link }
 
+// Neighbors lists the stack's ARP cache.
+func (s *Stack) Neighbors() []stack.NeighborEntry {
+	entries, err := s.stack.Neighbors(nicID, ipv4.ProtocolNumber)
+	if err != nil {
+		return nil
+	}
+	return entries
+}
+
+// ForgetNeighbors drops the ARP cache. The anchor calls it when a tunnel
+// attaches, because the sandbox behind a new tunnel may have a new MAC.
+func (s *Stack) ForgetNeighbors() {
+	_ = s.stack.ClearNeighbors(nicID, ipv4.ProtocolNumber)
+}
+
 // Close tears the stack down and releases its resources.
 func (s *Stack) Close() {
 	s.link.Close()

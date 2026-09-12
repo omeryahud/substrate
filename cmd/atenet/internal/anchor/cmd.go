@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -50,6 +51,9 @@ func NewAnchorCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cfg.CredentialBundlePath, "credential-bundle", "/run/servicedns.podcert.ate.dev/credential-bundle.pem", "PEM service-DNS credential bundle the attach and control listeners present to workers")
 	cmd.Flags().StringVar(&cfg.TrustBundlePath, "trust-bundle", "/run/podidentity.podcert.ate.dev/trust-bundle.pem", "PEM trust bundle that verifies router and worker client certificates")
 	cmd.Flags().StringVar(&cfg.RouterClientID, "router-client-identity", "spiffe://cluster.local/ns/ate-system/sa/atenet-router", "SPIFFE identity allowed on the ingress listener")
+	cmd.Flags().StringVar(&cfg.MetricsAddr, "metrics-listen-addr", ":9090", "Address the Prometheus metrics and health server listens on; empty disables it")
+	cmd.Flags().DurationVar(&cfg.HoldTTL, "hold-ttl", 24*time.Hour, "Drop an actor's held connections when no worker reattaches within this time; 0 holds forever")
+	cmd.Flags().BoolVar(&cfg.LogFrames, "log-frames", false, "Log one line per Ethernet frame at debug level")
 	cmd.Flags().StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, error")
 	return cmd
 }

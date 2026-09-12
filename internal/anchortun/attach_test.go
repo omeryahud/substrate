@@ -23,6 +23,7 @@ func validHeader() AttachHeader {
 	return AttachHeader{
 		Atespace:     "team-a",
 		ActorName:    "chatbot-1",
+		ActorUID:     "9d60e5a0-fef8-4f98-ad50-2333cfb75eb3",
 		WorkerPodUID: "3fa9c1e2-0000-4444-8888-abcdefabcdef",
 		ActivationID: "act-42",
 		Boot:         BootRestore,
@@ -58,6 +59,8 @@ func TestAttachHeader_Valid(t *testing.T) {
 		{"emptyAtespace", func(h *AttachHeader) { h.Atespace = "" }, true},
 		{"badAtespace", func(h *AttachHeader) { h.Atespace = "Not Valid" }, true},
 		{"emptyActor", func(h *AttachHeader) { h.ActorName = "" }, true},
+		{"emptyActorUID", func(h *AttachHeader) { h.ActorUID = "" }, true},
+		{"badCharsActorUID", func(h *AttachHeader) { h.ActorUID = "uid/1" }, true},
 		{"emptyWorkerUID", func(h *AttachHeader) { h.WorkerPodUID = "" }, true},
 		{"nonUUIDWorkerUID", func(h *AttachHeader) { h.WorkerPodUID = "worker-1" }, true},
 		{"emptyActivation", func(h *AttachHeader) { h.ActivationID = "" }, true},
@@ -83,11 +86,11 @@ func TestUnmarshalAttachHeader_Rejects(t *testing.T) {
 		in   string
 	}{
 		{"notJSON", "{not json"},
-		{"invalidFields", `{"atespace":"","actorName":"","workerPodUID":"","activationID":"","boot":""}`},
-		{"unknownBoot", `{"atespace":"a","actorName":"b","workerPodUID":"3fa9c1e2-0000-4444-8888-abcdefabcdef","activationID":"i","boot":"warm"}`},
-		{"unknownField", `{"atespace":"a","actorName":"b","workerPodUID":"3fa9c1e2-0000-4444-8888-abcdefabcdef","activationID":"i","boot":"restore","extra":"x"}`},
-		{"trailingGarbage", `{"atespace":"team-a","actorName":"chatbot-1","workerPodUID":"3fa9c1e2-0000-4444-8888-abcdefabcdef","activationID":"act-42","boot":"restore"}GARBAGE`},
-		{"trailingObject", `{"atespace":"team-a","actorName":"chatbot-1","workerPodUID":"3fa9c1e2-0000-4444-8888-abcdefabcdef","activationID":"act-42","boot":"restore"}{"atespace":"x"}`},
+		{"invalidFields", `{"atespace":"","actorName":"","actorUID":"","workerPodUID":"","activationID":"","boot":""}`},
+		{"unknownBoot", `{"atespace":"a","actorName":"b","actorUID":"u","workerPodUID":"3fa9c1e2-0000-4444-8888-abcdefabcdef","activationID":"i","boot":"warm"}`},
+		{"unknownField", `{"atespace":"a","actorName":"b","actorUID":"u","workerPodUID":"3fa9c1e2-0000-4444-8888-abcdefabcdef","activationID":"i","boot":"restore","extra":"x"}`},
+		{"trailingGarbage", `{"atespace":"team-a","actorName":"chatbot-1","actorUID":"u","workerPodUID":"3fa9c1e2-0000-4444-8888-abcdefabcdef","activationID":"act-42","boot":"restore"}GARBAGE`},
+		{"trailingObject", `{"atespace":"team-a","actorName":"chatbot-1","actorUID":"u","workerPodUID":"3fa9c1e2-0000-4444-8888-abcdefabcdef","activationID":"act-42","boot":"restore"}{"atespace":"x"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := UnmarshalAttachHeader([]byte(tc.in)); err == nil {
