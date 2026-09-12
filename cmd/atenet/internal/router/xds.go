@@ -95,7 +95,12 @@ const (
 
 	WildcardIP         = "0.0.0.0"
 	ConnectUpgradeType = "CONNECT"
-	MainInternalName   = "main_internal"
+	// WebSocketUpgradeType lets Envoy proxy a WebSocket upgrade to the actor.
+	// The upstream hop to atunnel is HTTP/1.1, which carries the upgrade, and
+	// the actor's connection must outlive individual requests so it can be
+	// preserved across suspend and resume.
+	WebSocketUpgradeType = "websocket"
+	MainInternalName     = "main_internal"
 
 	// dynamicMetadataPortFormat is the %DYNAMIC_METADATA(...)% header-value
 	// command operator (see buildRoutes) that derives atunnel.TargetPortHeader
@@ -1060,6 +1065,11 @@ func (x *XdsServer) buildHcm(statPrefix string, captureAuthority bool) *anypb.An
 			},
 		},
 		HttpFilters: httpFilters,
+		UpgradeConfigs: []*hcmv3.HttpConnectionManager_UpgradeConfig{
+			{
+				UpgradeType: WebSocketUpgradeType,
+			},
+		},
 		RouteSpecifier: &hcmv3.HttpConnectionManager_Rds{
 			Rds: &hcmv3.Rds{
 				RouteConfigName: RouteName,

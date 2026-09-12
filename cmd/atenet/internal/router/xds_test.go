@@ -38,6 +38,7 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	discoverygrpc "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	secretgrpc "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
@@ -996,5 +997,31 @@ func TestSnapshotVersionsUniqueAcrossRestarts(t *testing.T) {
 			t.Fatalf("version %q reused after restart; Envoy holding that version would not receive the new config", v)
 		}
 		seen[v] = true
+	}
+}
+
+// TestBuildHcm_EnablesWebSocketUpgrade covers WebSocket ingress: buildHcm must
+// declare a websocket upgrade so Envoy proxies the upgrade to the actor. The
+// worker hop is HTTP/1.1, which carries it. Without this entry Envoy refuses
+// the upgrade and long-lived actor connections cannot be preserved across
+// suspend and resume. Both ingress (captureAuthority true) and the internal
+// listener (false) share this HCM and must both allow the upgrade.
+func TestBuildHcm_EnablesWebSocketUpgrade(t *testing.T) {
+	x := NewXdsServer(18000)
+	for _, captureAuthority := range []bool{true, false} {
+		hcm := &hcmv3.HttpConnectionManager{}
+		if err := x.buildHcm("ingress", captureAuthority).UnmarshalTo(hcm); err != nil {
+			t.Fatalf("captureAuthority=%v: unmarshal HCM: %v", captureAuthority, err)
+		}
+		var found bool
+		for _, uc := range hcm.GetUpgradeConfigs() {
+			if uc.GetUpgradeType() == WebSocketUpgradeType {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("captureAuthority=%v: HCM has no %q upgrade config, got %v",
+				captureAuthority, WebSocketUpgradeType, hcm.GetUpgradeConfigs())
+		}
 	}
 }
