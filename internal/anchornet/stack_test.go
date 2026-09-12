@@ -136,3 +136,86 @@ func TestConnectionSurvivesTunnelSwap(t *testing.T) {
 	mustWrite(t, client, "hello-after-resume")
 	mustRead(t, server, "hello-after-resume")
 }
+
+// TestConnectionSurvivesFramedTunnelReconnect is the same claim carried over
+// the real anchortun frame codec rather than a raw packet relay: the tunnel is
+// a byte stream (net.Pipe) that the shuttle and the anchor each bridge to their
+// stack. Tearing the stream down and dialing a fresh one, as a reconnect on a
+// new worker does, preserves the TCP connection.
+func TestConnectionSurvivesFramedTunnelReconnect(t *testing.T) {
+	anchorStack, err := NewStack("169.254.17.1", 30)
+	if err != nil {
+		t.Fatalf("anchor NewStack: %v", err)
+	}
+	defer anchorStack.Close()
+	sandboxStack, err := NewStack("169.254.17.2", 30)
+	if err != nil {
+		t.Fatalf("sandbox NewStack: %v", err)
+	}
+	defer sandboxStack.Close()
+
+	// connectTunnel wires a fresh net.Pipe between the two links via Bridge,
+	// standing for the frame tunnel. It returns a cancel that tears it down.
+	connectTunnel := func() context.CancelFunc {
+		anchorEnd, sandboxEnd := net.Pipe()
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { _ = Bridge(ctx, anchorStack.Link(), anchorEnd) }()
+		go func() { _ = Bridge(ctx, sandboxStack.Link(), sandboxEnd) }()
+		return func() {
+			cancel()
+			anchorEnd.Close()
+			sandboxEnd.Close()
+		}
+	}
+
+	detach1 := connectTunnel()
+
+	addr := tcpip.FullAddress{Addr: anchorStack.Addr(), Port: testPort}
+	ln, err := gonet.ListenTCP(anchorStack.Stack(), addr, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatalf("ListenTCP: %v", err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan net.Conn, 1)
+	acceptErr := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			acceptErr <- err
+			return
+		}
+		accepted <- c
+	}()
+
+	dialCtx, cancelDial := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancelDial()
+	client, err := gonet.DialContextTCP(dialCtx, sandboxStack.Stack(), addr, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatalf("DialContextTCP: %v", err)
+	}
+	defer client.Close()
+
+	var server net.Conn
+	select {
+	case server = <-accepted:
+	case err := <-acceptErr:
+		t.Fatalf("Accept: %v", err)
+	case <-time.After(20 * time.Second):
+		t.Fatal("Accept timed out over the framed tunnel")
+	}
+	defer server.Close()
+
+	mustWrite(t, client, "framed-1")
+	mustRead(t, server, "framed-1")
+
+	// Reconnect the tunnel: tear the stream down and dial a fresh one.
+	detach1()
+	detach2 := connectTunnel()
+	defer detach2()
+
+	mustWrite(t, client, "framed-after-reconnect")
+	mustRead(t, server, "framed-after-reconnect")
+	mustWrite(t, server, "framed-reply")
+	mustRead(t, client, "framed-reply")
+}
