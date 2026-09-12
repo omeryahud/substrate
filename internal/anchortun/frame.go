@@ -26,10 +26,10 @@ import (
 	"io"
 )
 
-// MaxFrameSize bounds one tunneled Ethernet frame. It is large enough for a
-// GSO super-frame; the shuttle disables offloads so ordinary frames stay at
-// the link MTU. The cap stops a corrupt or hostile length prefix from forcing
-// a huge allocation.
+// MaxFrameSize bounds one tunneled Ethernet frame and caps the allocation a
+// length prefix can force. The shuttle disables offloads, so frames stay at
+// the link MTU of about 1514 bytes; the larger cap only leaves headroom
+// without trusting the peer's length.
 const MaxFrameSize = 65535
 
 // frameLenBytes is the width of the big-endian length prefix on each frame.
@@ -60,10 +60,11 @@ func WriteFrame(w io.Writer, frame []byte) error {
 	return nil
 }
 
-// ReadFrame reads one length-prefixed Ethernet frame from r. A length above
-// MaxFrameSize returns ErrFrameTooLarge and leaves r positioned after the
-// prefix, so the caller must close the stream rather than keep reading. A
-// short read of the payload returns io.ErrUnexpectedEOF.
+// ReadFrame reads one length-prefixed Ethernet frame from r. A clean end of
+// stream at a frame boundary returns io.EOF, the signal a read loop uses to
+// stop. A length above MaxFrameSize returns ErrFrameTooLarge and leaves r
+// positioned after the prefix, so the caller must close the stream rather than
+// keep reading. A short read of the payload returns io.ErrUnexpectedEOF.
 func ReadFrame(r io.Reader) ([]byte, error) {
 	var lenBuf [frameLenBytes]byte
 	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
@@ -81,4 +82,68 @@ func ReadFrame(r io.Reader) ([]byte, error) {
 		return nil, err
 	}
 	return frame, nil
+}
+
+// FrameConn carries frames over one stream while reusing its read and write
+// buffers, so steady-state framing on the data path does not allocate per
+// frame. One FrameConn is owned by a single goroutine for reads and a single
+// goroutine for writes; it is not safe for concurrent reads or concurrent
+// writes.
+type FrameConn struct {
+	rw     io.ReadWriter
+	wbuf   []byte
+	rbuf   []byte
+	lenBuf [frameLenBytes]byte
+}
+
+// NewFrameConn wraps a stream for buffered framing.
+func NewFrameConn(rw io.ReadWriter) *FrameConn {
+	return &FrameConn{rw: rw}
+}
+
+// WriteFrame writes one frame, reusing an internal buffer. It has the same
+// size rules as the package-level WriteFrame.
+func (c *FrameConn) WriteFrame(frame []byte) error {
+	if len(frame) == 0 {
+		return ErrEmptyFrame
+	}
+	if len(frame) > MaxFrameSize {
+		return fmt.Errorf("%w: %d bytes", ErrFrameTooLarge, len(frame))
+	}
+	need := frameLenBytes + len(frame)
+	if cap(c.wbuf) < need {
+		c.wbuf = make([]byte, need)
+	}
+	c.wbuf = c.wbuf[:need]
+	binary.BigEndian.PutUint32(c.wbuf, uint32(len(frame)))
+	copy(c.wbuf[frameLenBytes:], frame)
+	if _, err := c.rw.Write(c.wbuf); err != nil {
+		return fmt.Errorf("anchortun: writing frame: %w", err)
+	}
+	return nil
+}
+
+// ReadFrame reads one frame into an internal buffer and returns a slice that is
+// valid only until the next ReadFrame on this FrameConn, like bufio.Scanner.
+// Copy the bytes to keep them. Its error semantics match the package-level
+// ReadFrame.
+func (c *FrameConn) ReadFrame() ([]byte, error) {
+	if _, err := io.ReadFull(c.rw, c.lenBuf[:]); err != nil {
+		return nil, err
+	}
+	n := binary.BigEndian.Uint32(c.lenBuf[:])
+	if n == 0 {
+		return nil, ErrEmptyFrame
+	}
+	if n > MaxFrameSize {
+		return nil, fmt.Errorf("%w: %d bytes", ErrFrameTooLarge, n)
+	}
+	if uint32(cap(c.rbuf)) < n {
+		c.rbuf = make([]byte, n)
+	}
+	c.rbuf = c.rbuf[:n]
+	if _, err := io.ReadFull(c.rw, c.rbuf); err != nil {
+		return nil, err
+	}
+	return c.rbuf, nil
 }

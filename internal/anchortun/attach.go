@@ -15,11 +15,21 @@
 package anchortun
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 
 	"github.com/agent-substrate/substrate/internal/resources"
 )
+
+// workerPodUIDRE matches a Kubernetes pod UID, which is a UUID.
+var workerPodUIDRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// activationIDRE bounds the activation id ateapi mints: a short token of safe
+// characters. The bound stops an untrusted shuttle from supplying an
+// arbitrarily long or odd value.
+var activationIDRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // BootKind tells the anchor how to treat an actor's held connections when a
 // worker attaches.
@@ -47,8 +57,10 @@ type AttachHeader struct {
 }
 
 // Valid reports whether the header names a well-formed actor, a worker, an
-// activation, and a known boot kind. The anchor still checks the values
-// against the control plane; this only rejects malformed input early.
+// activation, and a known boot kind. It bounds the format of every field so an
+// untrusted shuttle cannot supply arbitrary or oversized input. It is not an
+// authorization gate: the anchor must still cross-check the actor, the worker,
+// and the activation against the control plane before it trusts the tunnel.
 func (h AttachHeader) Valid() error {
 	if !resources.IsValidResourceName(h.Atespace) {
 		return fmt.Errorf("anchortun: invalid atespace %q", h.Atespace)
@@ -56,11 +68,11 @@ func (h AttachHeader) Valid() error {
 	if !resources.IsValidResourceName(h.ActorName) {
 		return fmt.Errorf("anchortun: invalid actor name %q", h.ActorName)
 	}
-	if h.WorkerPodUID == "" {
-		return fmt.Errorf("anchortun: empty worker pod UID")
+	if !workerPodUIDRE.MatchString(h.WorkerPodUID) {
+		return fmt.Errorf("anchortun: invalid worker pod UID %q", h.WorkerPodUID)
 	}
-	if h.ActivationID == "" {
-		return fmt.Errorf("anchortun: empty activation ID")
+	if !activationIDRE.MatchString(h.ActivationID) {
+		return fmt.Errorf("anchortun: invalid activation ID %q", h.ActivationID)
 	}
 	if h.Boot != BootRestore && h.Boot != BootFresh {
 		return fmt.Errorf("anchortun: invalid boot kind %q", h.Boot)
@@ -81,10 +93,14 @@ func MarshalAttachHeader(h AttachHeader) ([]byte, error) {
 	return json.Marshal(h)
 }
 
-// UnmarshalAttachHeader decodes and validates a header from the handshake.
+// UnmarshalAttachHeader decodes and validates a header from the handshake. It
+// rejects unknown fields so a protocol mismatch fails loudly rather than being
+// silently dropped.
 func UnmarshalAttachHeader(b []byte) (AttachHeader, error) {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
 	var h AttachHeader
-	if err := json.Unmarshal(b, &h); err != nil {
+	if err := dec.Decode(&h); err != nil {
 		return AttachHeader{}, fmt.Errorf("anchortun: decoding attach header: %w", err)
 	}
 	if err := h.Valid(); err != nil {

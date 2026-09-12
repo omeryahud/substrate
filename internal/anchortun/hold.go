@@ -82,9 +82,13 @@ type Conn struct {
 }
 
 // NewConn returns a connection in the attached state. now supplies the clock,
-// so tests can drive the hold TTL without waiting. wakeOnData sets whether
-// data arriving while held should trigger a wake.
+// so tests can drive the hold TTL without waiting; a nil now defaults to
+// time.Now. wakeOnData sets whether data arriving while held should trigger a
+// wake.
 func NewConn(now func() time.Time, wakeOnData bool) *Conn {
+	if now == nil {
+		now = time.Now
+	}
 	return &Conn{state: StateAttached, wakeOnData: wakeOnData, now: now}
 }
 
@@ -111,6 +115,17 @@ func (c *Conn) Quiesce() error {
 		return err
 	}
 	c.state = StateQuiescing
+	return nil
+}
+
+// Unquiesce aborts a suspend that quiesced but did not detach, returning the
+// connection to attached so it can serve again. It matches a checkpoint that
+// failed before the worker was freed.
+func (c *Conn) Unquiesce() error {
+	if err := c.require("unquiesce", StateQuiescing); err != nil {
+		return err
+	}
+	c.state = StateAttached
 	return nil
 }
 
@@ -142,7 +157,7 @@ func (c *Conn) DataArrived() (wake bool, err error) {
 	case StateWaking:
 		return false, nil
 	default:
-		return false, ErrInvalidTransition{From: c.state, Event: "receive data while held"}
+		return false, ErrInvalidTransition{From: c.state, Event: "receive data"}
 	}
 }
 
@@ -157,7 +172,11 @@ func (c *Conn) Attach() error {
 	return nil
 }
 
-// Close ends the connection normally, when either side closes while attached.
+// Close ends the connection normally, when either side closes while the actor
+// is attached or quiescing. A far-end close that arrives while the connection
+// is held is deliberately not applied here: the anchor keeps the held endpoint
+// and delivers the end of stream to the actor when it reattaches, so a held
+// connection never becomes Closed or Reset merely because the peer went away.
 func (c *Conn) Close() error {
 	if err := c.require("close", StateAttached, StateQuiescing); err != nil {
 		return err
@@ -174,6 +193,7 @@ func (c *Conn) Reset() error {
 		return ErrInvalidTransition{From: c.state, Event: "reset"}
 	}
 	c.state = StateReset
+	c.heldSince = time.Time{}
 	return nil
 }
 

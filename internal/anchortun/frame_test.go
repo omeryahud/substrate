@@ -22,6 +22,18 @@ import (
 	"testing"
 )
 
+// errWriter fails every write, to exercise the write-error path.
+type errWriter struct{}
+
+func (errWriter) Write([]byte) (int, error) { return 0, errors.New("boom") }
+
+// rwPipe joins a bytes.Buffer for reads and a target writer, so a FrameConn
+// can write to one place and read from another in a test.
+type rwPipe struct {
+	io.Reader
+	io.Writer
+}
+
 func TestWriteReadFrame_RoundTrip(t *testing.T) {
 	frames := [][]byte{
 		{0x01},
@@ -63,6 +75,71 @@ func TestWriteFrame_Rejects(t *testing.T) {
 				t.Errorf("WriteFrame = %v, want %v", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestWriteFrame_WriteError(t *testing.T) {
+	if err := WriteFrame(errWriter{}, []byte("data")); err == nil {
+		t.Error("WriteFrame to a failing writer succeeded, want error")
+	}
+	fc := NewFrameConn(rwPipe{Reader: &bytes.Buffer{}, Writer: errWriter{}})
+	if err := fc.WriteFrame([]byte("data")); err == nil {
+		t.Error("FrameConn.WriteFrame to a failing writer succeeded, want error")
+	}
+}
+
+// TestFrameConn_RoundTripNoAlloc: FrameConn round-trips frames and, after its
+// buffers are warm, does not allocate per frame.
+func TestFrameConn_RoundTripNoAlloc(t *testing.T) {
+	var buf bytes.Buffer
+	fc := NewFrameConn(&buf)
+	frames := [][]byte{
+		[]byte("first"),
+		bytes.Repeat([]byte{0x7f}, 1514),
+		[]byte("third"),
+	}
+	for i, f := range frames {
+		if err := fc.WriteFrame(f); err != nil {
+			t.Fatalf("WriteFrame #%d: %v", i, err)
+		}
+		got, err := fc.ReadFrame()
+		if err != nil {
+			t.Fatalf("ReadFrame #%d: %v", i, err)
+		}
+		if !bytes.Equal(got, f) {
+			t.Errorf("frame #%d mismatch", i)
+		}
+	}
+
+	warm := bytes.Repeat([]byte{0x5a}, 1514)
+	allocs := testing.AllocsPerRun(100, func() {
+		buf.Reset()
+		if err := fc.WriteFrame(warm); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fc.ReadFrame(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if allocs != 0 {
+		t.Errorf("FrameConn steady-state allocs/op = %v, want 0", allocs)
+	}
+}
+
+func TestFrameConn_Rejects(t *testing.T) {
+	fc := NewFrameConn(&bytes.Buffer{})
+	if err := fc.WriteFrame(nil); !errors.Is(err, ErrEmptyFrame) {
+		t.Errorf("WriteFrame(nil) = %v, want ErrEmptyFrame", err)
+	}
+	if err := fc.WriteFrame(bytes.Repeat([]byte{0}, MaxFrameSize+1)); !errors.Is(err, ErrFrameTooLarge) {
+		t.Errorf("WriteFrame(oversize) = %v, want ErrFrameTooLarge", err)
+	}
+
+	oversize := make([]byte, frameLenBytes)
+	binary.BigEndian.PutUint32(oversize, MaxFrameSize+1)
+	rfc := NewFrameConn(rwPipe{Reader: bytes.NewReader(oversize), Writer: io.Discard})
+	if _, err := rfc.ReadFrame(); !errors.Is(err, ErrFrameTooLarge) {
+		t.Errorf("ReadFrame(oversize) = %v, want ErrFrameTooLarge", err)
 	}
 }
 

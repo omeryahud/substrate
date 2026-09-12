@@ -14,7 +14,10 @@
 
 package anchortun
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func validHeader() AttachHeader {
 	return AttachHeader{
@@ -56,7 +59,10 @@ func TestAttachHeader_Valid(t *testing.T) {
 		{"badAtespace", func(h *AttachHeader) { h.Atespace = "Not Valid" }, true},
 		{"emptyActor", func(h *AttachHeader) { h.ActorName = "" }, true},
 		{"emptyWorkerUID", func(h *AttachHeader) { h.WorkerPodUID = "" }, true},
+		{"nonUUIDWorkerUID", func(h *AttachHeader) { h.WorkerPodUID = "worker-1" }, true},
 		{"emptyActivation", func(h *AttachHeader) { h.ActivationID = "" }, true},
+		{"tooLongActivation", func(h *AttachHeader) { h.ActivationID = strings.Repeat("a", 65) }, true},
+		{"badCharsActivation", func(h *AttachHeader) { h.ActivationID = "act 42" }, true},
 		{"emptyBoot", func(h *AttachHeader) { h.Boot = "" }, true},
 		{"unknownBoot", func(h *AttachHeader) { h.Boot = "warm" }, true},
 	} {
@@ -78,7 +84,8 @@ func TestUnmarshalAttachHeader_Rejects(t *testing.T) {
 	}{
 		{"notJSON", "{not json"},
 		{"invalidFields", `{"atespace":"","actorName":"","workerPodUID":"","activationID":"","boot":""}`},
-		{"unknownBoot", `{"atespace":"a","actorName":"b","workerPodUID":"u","activationID":"i","boot":"warm"}`},
+		{"unknownBoot", `{"atespace":"a","actorName":"b","workerPodUID":"3fa9c1e2-0000-4444-8888-abcdefabcdef","activationID":"i","boot":"warm"}`},
+		{"unknownField", `{"atespace":"a","actorName":"b","workerPodUID":"3fa9c1e2-0000-4444-8888-abcdefabcdef","activationID":"i","boot":"restore","extra":"x"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := UnmarshalAttachHeader([]byte(tc.in)); err == nil {

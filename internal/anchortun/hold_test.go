@@ -207,3 +207,92 @@ func TestConn_TTL(t *testing.T) {
 		t.Error("attached connection reported TTL expiry")
 	}
 }
+
+// TestConn_Unquiesce: a suspend that quiesced but did not detach can abort
+// back to attached; unquiesce is invalid from any other state.
+func TestConn_Unquiesce(t *testing.T) {
+	c := NewConn(newClock().now, true)
+	_ = c.Quiesce()
+	if err := c.Unquiesce(); err != nil {
+		t.Fatalf("Unquiesce from quiescing: %v", err)
+	}
+	if c.State() != StateAttached {
+		t.Errorf("state = %s, want attached", c.State())
+	}
+	var invalid ErrInvalidTransition
+	if err := c.Unquiesce(); !errors.As(err, &invalid) {
+		t.Errorf("Unquiesce from attached = %v, want ErrInvalidTransition", err)
+	}
+}
+
+// TestConn_ProactiveAttachFromHeld: a resume triggered by something other than
+// data attaches a held connection directly, without a wake.
+func TestConn_ProactiveAttachFromHeld(t *testing.T) {
+	c := NewConn(newClock().now, true)
+	_ = c.Detach()
+	if err := c.Attach(); err != nil {
+		t.Fatalf("Attach from held: %v", err)
+	}
+	if c.State() != StateAttached {
+		t.Errorf("state = %s, want attached", c.State())
+	}
+}
+
+// TestConn_CloseFromQuiescing: a close during a quiesce ends the connection.
+func TestConn_CloseFromQuiescing(t *testing.T) {
+	c := NewConn(newClock().now, true)
+	_ = c.Quiesce()
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close from quiescing: %v", err)
+	}
+	if c.State() != StateClosed {
+		t.Errorf("state = %s, want closed", c.State())
+	}
+}
+
+// TestConn_ResetClearsHeldFor: after a reset, HeldFor honors its contract of
+// zero, so a caller never reads a growing hold time from a dead connection.
+func TestConn_ResetClearsHeldFor(t *testing.T) {
+	clk := newClock()
+	c := NewConn(clk.now, true)
+	_ = c.Detach()
+	clk.add(time.Hour)
+	if err := c.Reset(); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	clk.add(time.Hour)
+	if c.HeldFor() != 0 {
+		t.Errorf("HeldFor after reset = %s, want 0", c.HeldFor())
+	}
+}
+
+func TestState_String(t *testing.T) {
+	for s, want := range map[State]string{
+		StateAttached:  "attached",
+		StateQuiescing: "quiescing",
+		StateHeld:      "held",
+		StateWaking:    "waking",
+		StateClosed:    "closed",
+		StateReset:     "reset",
+		State(99):      "state(99)",
+	} {
+		if got := s.String(); got != want {
+			t.Errorf("State(%d).String() = %q, want %q", int(s), got, want)
+		}
+	}
+}
+
+func TestErrInvalidTransition_Error(t *testing.T) {
+	err := ErrInvalidTransition{From: StateHeld, Event: "quiesce"}
+	if got, want := err.Error(), "anchortun: cannot quiesce from state held"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+func TestNewConn_NilClockDefaults(t *testing.T) {
+	c := NewConn(nil, true)
+	_ = c.Detach()
+	if c.HeldFor() < 0 {
+		t.Error("HeldFor with default clock returned negative")
+	}
+}
