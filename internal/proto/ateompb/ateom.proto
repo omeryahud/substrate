@@ -126,6 +126,12 @@ message RunWorkloadRequest {
   // runtime default (unlimited for gVisor, the kata config for the micro-VM).
   int64 cpu_milli = 11;    // CPU limit in millicores (1000 = one core).
   int64 memory_bytes = 12; // Memory limit in bytes.
+
+  // When present, ateom does not terminate the actor's connections locally.
+  // It shuttles the sandbox's frames to the anchor, which holds the actor's
+  // TCP endpoints across suspend and resume. When absent, atunnel and the
+  // nftables path are used as today.
+  optional ConnectionAnchor anchor = 13;
 }
 
 // EgressGateway configures tunneled egress for one actor activation.
@@ -133,6 +139,13 @@ message EgressGateway {
   // address is required and identifies the remote gateway as an IP address or
   // DNS name followed by its port.
   string address = 1;
+}
+
+// ConnectionAnchor names the anchor ateom attaches the actor's frame tunnel
+// to for one activation.
+message ConnectionAnchor {
+  // attach_address is the anchor's attach listener as host:port.
+  string attach_address = 1;
 }
 
 // WorkloadSpec parallels Pod, but with far fewer configurable fields.
@@ -301,6 +314,9 @@ message RestoreWorkloadRequest {
   // these are ignored. Zero means "unset": keep the runtime default.
   int64 cpu_milli = 14;    // CPU limit in millicores (1000 = one core).
   int64 memory_bytes = 15; // Memory limit in bytes.
+
+  // See RunWorkloadRequest.anchor.
+  optional ConnectionAnchor anchor = 16;
 }
 
 message RestoreWorkloadResponse {

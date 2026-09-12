@@ -305,6 +305,13 @@ message WorkerAssignment {
 
   // worker_pod_ip is the IP of worker_pod.
   string worker_pod_ip = 5;
+
+  // anchor_address is the connection anchor's ingress listener (host:port)
+  // for an Actor whose connections are preserved across suspend and resume.
+  // The router sends ingress there instead of to worker_pod_ip, because the
+  // Actor's TCP endpoints live in the anchor and do not move with the worker.
+  // Empty for Actors that use the worker's local ingress path.
+  string anchor_address = 7;
 }
 
 // ActorSnapshot is an independently addressable durable Actor snapshot. Its

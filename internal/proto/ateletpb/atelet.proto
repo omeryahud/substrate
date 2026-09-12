@@ -83,6 +83,12 @@ message RunRequest {
   // whole host or worker pod). Zero means "unset": keep the runtime default.
   int64 cpu_milli = 10;    // CPU limit in millicores (1000 = one core).
   int64 memory_bytes = 11; // Memory limit in bytes.
+
+  // When present, the actor's connections terminate in the connection anchor
+  // and the worker only shuttles frames to it, so open TCP connections
+  // survive suspend and resume. When absent, the worker's local atunnel path
+  // is used as today.
+  optional ConnectionAnchor anchor = 12;
 }
 
 // EgressGateway configures tunneled egress for one actor activation.
@@ -90,6 +96,13 @@ message EgressGateway {
   // address is required and identifies the remote gateway as an IP address or
   // DNS name followed by its port.
   string address = 1;
+}
+
+// ConnectionAnchor names the anchor a worker attaches the actor's frame tunnel
+// to for one activation.
+message ConnectionAnchor {
+  // attach_address is the anchor's attach listener as host:port.
+  string attach_address = 1;
 }
 
 // AssetFile is one content-addressed file atelet fetches for a sandbox runtime
@@ -380,6 +393,9 @@ message RestoreRequest {
   // means "unset": keep the runtime default.
   int64 cpu_milli = 14;    // CPU limit in millicores (1000 = one core).
   int64 memory_bytes = 15; // Memory limit in bytes.
+
+  // See RunRequest.anchor.
+  optional ConnectionAnchor anchor = 16;
 }
 
 message RestoreResponse {
