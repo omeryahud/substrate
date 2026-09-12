@@ -27,6 +27,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/e2e"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"github.com/gorilla/websocket"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -49,6 +50,59 @@ func TestActorDirectAccess(t *testing.T) {
 		})
 		t.Logf("Actor access through ingress succeeded; body: %s", body)
 	})
+}
+
+// TestActorWebSocket exercises a WebSocket upgrade through the ingress router
+// to the Actor. Envoy only proxies an upgrade its HCM declares, so this proves
+// the router's websocket upgrade config reaches a real Actor: the client
+// upgrades, sends a message, and the Actor echoes it back over the same
+// connection.
+func TestActorWebSocket(t *testing.T) {
+	ctx := context.Background()
+	actorName, _ := createAndResumeActor(t, ctx, "websocket", e2e.CounterFixture())
+	router := mustRouterClient(t, ctx)
+	defer router.Close()
+
+	actorRef := resources.ActorRef{Atespace: networkingAtespace, Name: actorName}
+	// Resume the Actor and wait for its route before upgrading, riding out the
+	// xDS propagation race the same way the other ingress tests do.
+	waitForRouteReady(t, "Actor readyz before WebSocket", func() (*http.Response, error) {
+		return router.Get(ctx, actorRef, "/readyz")
+	})
+
+	var conn *websocket.Conn
+	var lastErr error
+	for attempt := 0; attempt < 30; attempt++ {
+		c, resp, err := router.DialWebSocket(ctx, actorRef, "/ws")
+		if err == nil {
+			conn = c
+			break
+		}
+		lastErr = err
+		if resp != nil {
+			lastErr = fmt.Errorf("%w (handshake status %s)", err, resp.Status)
+		}
+		time.Sleep(time.Second)
+	}
+	if conn == nil {
+		t.Fatalf("WebSocket upgrade through the router never succeeded: %v", lastErr)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("hello")); err != nil {
+		t.Fatalf("WriteMessage: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("ReadMessage: %v", err)
+	}
+	if got, want := string(msg), "echo: hello"; got != want {
+		t.Errorf("WebSocket echo = %q, want %q", got, want)
+	}
+	t.Logf("WebSocket echo through ingress succeeded: %q", msg)
 }
 
 // TestActorEgress exercises the full egress path. The Actor's outbound TCP

@@ -35,8 +35,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/spf13/pflag"
 )
+
+// wsUpgrader upgrades an ingress request to a WebSocket. The origin check is
+// open because access control happens at the router, not in the actor.
+var wsUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 
 var (
 	requestCount             uint64
@@ -147,6 +152,26 @@ func main() {
 		slog.InfoContext(r.Context(), "Updated SIGTERM sleep duration", slog.Int("duration_secs", d))
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(response))
+	})
+
+	// /ws echoes each WebSocket message, prefixed, so a test can prove a
+	// WebSocket upgrade travels through the router and atunnel to the actor.
+	defaultMux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := wsUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			slog.ErrorContext(r.Context(), "WebSocket upgrade failed", slog.Any("err", err))
+			return
+		}
+		defer conn.Close()
+		for {
+			messageType, msg, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if err := conn.WriteMessage(messageType, append([]byte("echo: "), msg...)); err != nil {
+				return
+			}
+		}
 	})
 
 	go func() {

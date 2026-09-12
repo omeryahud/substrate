@@ -31,6 +31,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/ateclient"
 	"github.com/agent-substrate/substrate/internal/portforward"
 	"github.com/agent-substrate/substrate/internal/resources"
+	"github.com/gorilla/websocket"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -111,6 +112,23 @@ func (c *RouterClient) Get(ctx context.Context, actorRef resources.ActorRef, pat
 // caller must close the response body.
 func (c *RouterClient) PostJSON(ctx context.Context, actorRef resources.ActorRef, path string, body []byte) (*http.Response, error) {
 	return c.request(ctx, http.MethodPost, actorRef, path, bytes.NewReader(body))
+}
+
+// DialWebSocket opens a WebSocket to an Actor through the ingress router. The
+// URL host is the Actor's DNS name so the router routes and resumes it, while
+// the TCP connection goes to the port-forwarded router. It exercises the
+// WebSocket upgrade the router enables on its ingress HCM. The caller must
+// close the returned connection.
+func (c *RouterClient) DialWebSocket(ctx context.Context, actorRef resources.ActorRef, path string) (*websocket.Conn, *http.Response, error) {
+	routerAddr := strings.TrimPrefix(c.baseURL, "http://")
+	dialer := websocket.Dialer{
+		NetDialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, routerAddr)
+		},
+		HandshakeTimeout: 15 * time.Second,
+	}
+	u := "ws://" + resources.ActorDNSName(actorRef) + path
+	return dialer.DialContext(ctx, u, nil)
 }
 
 func (c *RouterClient) request(ctx context.Context, method string, actorRef resources.ActorRef, path string, body io.Reader) (*http.Response, error) {
