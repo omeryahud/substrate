@@ -92,7 +92,11 @@ func (s *Stack) Neighbors() []stack.NeighborEntry {
 }
 
 // ForgetNeighbors drops the ARP cache. The anchor calls it when a tunnel
-// attaches, because the sandbox behind a new tunnel may have a new MAC.
+// attaches: every activation gives the sandbox a new veth with a new random
+// MAC, and gVisor's link endpoint drops unicast frames that are not addressed
+// to its current MAC, so frames sent to a remembered MAC would vanish until
+// neighbor unreachability detection noticed, which can take longer than a
+// readiness probe budget.
 func (s *Stack) ForgetNeighbors() {
 	_ = s.stack.ClearNeighbors(nicID, ipv4.ProtocolNumber)
 }

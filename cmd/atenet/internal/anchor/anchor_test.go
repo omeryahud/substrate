@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 
 	"github.com/agent-substrate/substrate/internal/anchornet"
+	"github.com/agent-substrate/substrate/internal/anchortun"
 	"github.com/agent-substrate/substrate/internal/ateomnet/actoraddr"
 	"github.com/agent-substrate/substrate/internal/atunnel"
 	"github.com/agent-substrate/substrate/internal/resources"
@@ -262,6 +264,187 @@ func TestServeProbe(t *testing.T) {
 	}
 	if code := probe("atespace=team-a&actor=alpha&port=nope"); code != http.StatusBadRequest {
 		t.Errorf("probe with bad port = %d, want 400", code)
+	}
+}
+
+// attachTunnel plays a worker's shuttle over an in-memory pipe: it sends the
+// attach header, then bridges the fake sandbox's link over the pipe. It
+// returns a function that drops the tunnel the way a stopped shuttle does.
+func attachTunnel(t *testing.T, a *Anchor, hdr anchortun.AttachHeader, sandbox *anchornet.Stack) (drop func()) {
+	t.Helper()
+	anchorEnd, workerEnd := net.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.handleAttach(ctx, anchorEnd)
+	}()
+	raw, err := anchortun.MarshalAttachHeader(hdr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := anchortun.WriteFrame(workerEnd, raw); err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = anchornet.Bridge(ctx, sandbox.Link(), workerEnd) }()
+	return func() {
+		workerEnd.Close()
+		<-done
+		cancel()
+	}
+}
+
+func newSandboxStack(t *testing.T, body string) *anchornet.Stack {
+	t.Helper()
+	st, err := anchornet.NewEthernetStack(actoraddr.ActorVethIP, actoraddr.PrefixLen, "02:a8:1e:00:00:02")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ip := net.ParseIP(actoraddr.ActorVethIP).To4()
+	ln, err := gonet.ListenTCP(st.Stack(), tcpip.FullAddress{Addr: tcpip.AddrFromSlice(ip), Port: 80}, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) })}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close(); st.Close() })
+	return st
+}
+
+// TestHandleAttach_HoldsAcrossReattach drives the anchor's attach path end to
+// end: a worker attaches, ingress reaches the sandbox, the tunnel drops and
+// the stack is held, a second worker reattaches with the same actor UID and
+// ingress works again; a fresh boot then replaces the stack.
+func TestHandleAttach_HoldsAcrossReattach(t *testing.T) {
+	a := newTestAnchor()
+	ref := resources.ActorRef{Atespace: "team-a", Name: "alpha"}
+	hdr := anchortun.AttachHeader{
+		Atespace: ref.Atespace, ActorName: ref.Name, ActorUID: "uid-a",
+		WorkerPodUID: "3fa9c1e2-0000-4444-8888-abcdefabcdef", ActivationID: "act-1", Boot: anchortun.BootRestore,
+	}
+	sandbox := newSandboxStack(t, "hello")
+	get := func() (int, string) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.Host = resources.ActorDNSName(ref)
+		w := httptest.NewRecorder()
+		a.ServeHTTP(w, r)
+		return w.Code, w.Body.String()
+	}
+	waitAttached := func() *actorEntry {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if e := a.lookup(ref); e != nil {
+				e.mu.Lock()
+				attached := e.detach != nil
+				e.mu.Unlock()
+				if attached {
+					return e
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatal("actor never attached")
+		return nil
+	}
+
+	drop := attachTunnel(t, a, hdr, sandbox)
+	first := waitAttached()
+	if code, body := get(); code != http.StatusOK || body != "hello" {
+		t.Fatalf("ingress while attached: %d %q", code, body)
+	}
+	if first.framesToActor.Load() == 0 || first.framesFromActor.Load() == 0 {
+		t.Error("frame counters did not move")
+	}
+
+	drop()
+	first.mu.Lock()
+	held := first.detach == nil && !first.heldSince.IsZero()
+	first.mu.Unlock()
+	if !held {
+		t.Fatal("stack was not marked held after the tunnel dropped")
+	}
+	if a.lookup(ref) != first {
+		t.Fatal("held stack was discarded")
+	}
+
+	hdr.ActivationID = "act-2"
+	hdr.WorkerPodUID = "3fa9c1e2-0000-4444-8888-000000000002"
+	drop2 := attachTunnel(t, a, hdr, sandbox)
+	defer drop2()
+	if waitAttached() != first {
+		t.Fatal("reattach did not reuse the held stack")
+	}
+	if code, body := get(); code != http.StatusOK || body != "hello" {
+		t.Fatalf("ingress after reattach: %d %q", code, body)
+	}
+
+	hdr.ActivationID = "act-3"
+	hdr.Boot = anchortun.BootFresh
+	drop3 := attachTunnel(t, a, hdr, sandbox)
+	defer drop3()
+	deadline := time.Now().Add(5 * time.Second)
+	for a.lookup(ref) == first && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if a.lookup(ref) == first {
+		t.Fatal("fresh boot did not replace the held stack")
+	}
+}
+
+// TestHandleAttach_RejectsBadHeader: a tunnel that does not start with a valid
+// header is closed without creating a stack.
+func TestHandleAttach_RejectsBadHeader(t *testing.T) {
+	a := newTestAnchor()
+	anchorEnd, workerEnd := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.handleAttach(context.Background(), anchorEnd)
+	}()
+	if err := anchortun.WriteFrame(workerEnd, []byte(`{"atespace":"team-a"}`)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleAttach did not return on a bad header")
+	}
+	a.mu.Lock()
+	n := len(a.actors)
+	a.mu.Unlock()
+	if n != 0 {
+		t.Errorf("bad header created %d stacks", n)
+	}
+}
+
+func TestVerifyPeers(t *testing.T) {
+	a := newTestAnchor()
+	a.cfg.RouterClientID = "spiffe://cluster.local/ns/ate-system/sa/atenet-router"
+	uri := func(s string) *url.URL {
+		u, err := url.Parse(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	router := []*url.URL{uri(a.cfg.RouterClientID)}
+	worker := []*url.URL{uri("spiffe://cluster.local/ns/ate-demo-counter/sa/default")}
+	stranger := []*url.URL{uri("https://example.com/not-spiffe")}
+
+	if err := a.verifyRouter(router); err != nil {
+		t.Errorf("verifyRouter(router) = %v", err)
+	}
+	if err := a.verifyRouter(worker); err == nil {
+		t.Error("verifyRouter accepted a worker identity")
+	}
+	if err := verifyWorkload(worker); err != nil {
+		t.Errorf("verifyWorkload(worker) = %v", err)
+	}
+	if err := verifyWorkload(stranger); err == nil {
+		t.Error("verifyWorkload accepted a non-SPIFFE identity")
+	}
+	if err := verifyWorkload(nil); err == nil {
+		t.Error("verifyWorkload accepted a certificate without URIs")
 	}
 }
 

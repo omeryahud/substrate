@@ -667,6 +667,15 @@ Templates that do not opt in keep the current worker-local egress path.
   establish them lazily.
 - Host GSO is turned off for anchored sandboxes so that frames on the veth
   fit the MTU (see "Offloads").
+- **The sandbox's MAC changes on every activation.** Each activation creates
+  a new veth pair with random MACs, and gVisor's `fdbased` link endpoint
+  drops unicast frames that are not addressed to its current MAC
+  (`parseInboundHeader`). The anchor therefore forgets its ARP cache each
+  time a tunnel attaches and resolves the sandbox again before sending to
+  it; its existing TCP endpoints pick up the new MAC from that resolution.
+  Without this, frames to the remembered MAC vanish until the anchor's
+  neighbor unreachability detection gives up on it, which can take longer
+  than the readiness probe budget, so resumes failed about half the time.
 - `--network=sandbox` is the only supported mode, as today.
 
 ### Micro-VM specifics
