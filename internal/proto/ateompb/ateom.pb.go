@@ -466,8 +466,11 @@ type ConnectionAnchor struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// attach_address is the anchor's attach listener as host:port.
 	AttachAddress string `protobuf:"bytes,1,opt,name=attach_address,json=attachAddress,proto3" json:"attach_address,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// control_address is the anchor's control listener as host:port, which
+	// ateom uses for readiness probes into the actor's stack.
+	ControlAddress string `protobuf:"bytes,2,opt,name=control_address,json=controlAddress,proto3" json:"control_address,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ConnectionAnchor) Reset() {
@@ -503,6 +506,13 @@ func (*ConnectionAnchor) Descriptor() ([]byte, []int) {
 func (x *ConnectionAnchor) GetAttachAddress() string {
 	if x != nil {
 		return x.AttachAddress
+	}
+	return ""
+}
+
+func (x *ConnectionAnchor) GetControlAddress() string {
+	if x != nil {
+		return x.ControlAddress
 	}
 	return ""
 }
@@ -1739,9 +1749,10 @@ const file_ateom_proto_rawDesc = "" +
 	"\x0f_egress_gatewayB\t\n" +
 	"\a_anchor\")\n" +
 	"\rEgressGateway\x12\x18\n" +
-	"\aaddress\x18\x01 \x01(\tR\aaddress\"9\n" +
+	"\aaddress\x18\x01 \x01(\tR\aaddress\"b\n" +
 	"\x10ConnectionAnchor\x12%\n" +
-	"\x0eattach_address\x18\x01 \x01(\tR\rattachAddress\"@\n" +
+	"\x0eattach_address\x18\x01 \x01(\tR\rattachAddress\x12'\n" +
+	"\x0fcontrol_address\x18\x02 \x01(\tR\x0econtrolAddress\"@\n" +
 	"\fWorkloadSpec\x120\n" +
 	"\n" +
 	"containers\x18\x01 \x03(\v2\x10.ateom.ContainerR\n" +

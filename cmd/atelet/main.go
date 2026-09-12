@@ -500,6 +500,7 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (resp *
 		Spec:                   spec,
 		ActorUid:               actorUID,
 		EgressGateway:          toAteomEgressGateway(req.GetEgressGateway()),
+		Anchor:                 toAteomConnectionAnchor(req.GetAnchor()),
 		CpuMilli:               req.GetCpuMilli(),
 		MemoryBytes:            req.GetMemoryBytes(),
 	}); err != nil {
@@ -1163,6 +1164,7 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 		Scope:                  toAteomSnapshotScope(req.GetScope()),
 		ActorUid:               req.GetActorUid(),
 		EgressGateway:          toAteomEgressGateway(req.GetEgressGateway()),
+		Anchor:                 toAteomConnectionAnchor(req.GetAnchor()),
 		CpuMilli:               req.GetCpuMilli(),
 		MemoryBytes:            req.GetMemoryBytes(),
 		// Informational: for DATA_ON_GOLDEN the golden snapshot's files are
@@ -1670,6 +1672,16 @@ func toAteomEgressGateway(gateway *ateletpb.EgressGateway) *ateompb.EgressGatewa
 		return nil
 	}
 	return &ateompb.EgressGateway{Address: gateway.GetAddress()}
+}
+
+func toAteomConnectionAnchor(anchor *ateletpb.ConnectionAnchor) *ateompb.ConnectionAnchor {
+	if anchor == nil {
+		return nil
+	}
+	return &ateompb.ConnectionAnchor{
+		AttachAddress:  anchor.GetAttachAddress(),
+		ControlAddress: anchor.GetControlAddress(),
+	}
 }
 
 // toAteomReadyz converts an ateletpb readyz probe into the ateompb wire

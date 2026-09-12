@@ -26,6 +26,7 @@ import (
 	"os"
 	"runtime"
 
+	"github.com/agent-substrate/substrate/internal/ateomnet/actoraddr"
 	"github.com/google/nftables"
 	"github.com/google/nftables/binaryutil"
 	"github.com/google/nftables/expr"
@@ -34,17 +35,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// The addressing constants live in actoraddr so components without a netns
+// (the connection anchor) can share them; they are re-exported here for the
+// existing callers.
 const (
-	HostVethName      = "ateom0"
-	ActorVethName     = "eth0"
-	HostVethCIDR      = "169.254.17.1/30"
-	ActorVethCIDR     = "169.254.17.2/30"
-	ActorVethGateway  = "169.254.17.1"
-	ActorVethIP       = "169.254.17.2"
+	HostVethName      = actoraddr.HostVethName
+	ActorVethName     = actoraddr.ActorVethName
+	HostVethCIDR      = actoraddr.HostVethCIDR
+	ActorVethCIDR     = actoraddr.ActorVethCIDR
+	ActorVethGateway  = actoraddr.ActorVethGateway
+	ActorVethIP       = actoraddr.ActorVethIP
 	ActorNftTableName = "ateom_actor"
 
 	// ActorVethSubnet is the point-to-point /30 the actor veth lives on.
-	ActorVethSubnet = "169.254.17.0/30"
+	ActorVethSubnet = actoraddr.ActorVethSubnet
 )
 
 var (
@@ -372,6 +376,16 @@ func ActorEgressRedirectRule(table *nftables.Table, chain *nftables.Chain, port 
 	return &nftables.Rule{Table: table, Chain: chain, Exprs: exprs}
 }
 
+// disableIPv6 stops the kernel from speaking IPv6 on an anchored host veth,
+// so no router solicitations or neighbor discovery leak into the tunnel.
+// Best effort: a kernel without IPv6 has no such file.
+func disableIPv6(ctx context.Context, iface string) {
+	path := "/proc/sys/net/ipv6/conf/" + iface + "/disable_ipv6"
+	if err := os.WriteFile(path, []byte("1"), 0o644); err != nil {
+		slog.WarnContext(ctx, "Failed to disable IPv6 on anchored host veth", slog.String("iface", iface), slog.Any("err", err))
+	}
+}
+
 // CreateNetNSWithoutSwitching creates a named netns and returns its handle,
 // restoring the caller's current netns before returning.
 func CreateNetNSWithoutSwitching(name string) (netns.NsHandle, error) {
@@ -478,6 +492,12 @@ type NetworkConfig struct {
 	// on the masquerade path.
 	// Used by: Both gVisor and MicroVM.
 	EgressRedirectPort uint16
+
+	// Anchored leaves the worker kernel out of the actor's network: the host
+	// veth gets no address, no forwarding, and no nftables, and is put in
+	// promiscuous mode so the frame shuttle can carry every frame to the
+	// connection anchor, which owns the gateway address over the tunnel.
+	Anchored bool
 }
 
 // SetupActorNetwork builds a fresh point-to-point network between the worker
@@ -554,8 +574,15 @@ func SetupActorNetwork(ctx context.Context, cfg NetworkConfig) (retErr error) {
 	if err != nil {
 		return fmt.Errorf("while getting host veth: %w", err)
 	}
-	if err := netlink.AddrReplace(hostLink, HostVethAddr); err != nil {
-		return fmt.Errorf("while assigning host veth address: %w", err)
+	if cfg.Anchored {
+		if err := netlink.SetPromiscOn(hostLink); err != nil {
+			return fmt.Errorf("while enabling promiscuous mode on host veth: %w", err)
+		}
+		disableIPv6(ctx, HostVethName)
+	} else {
+		if err := netlink.AddrReplace(hostLink, HostVethAddr); err != nil {
+			return fmt.Errorf("while assigning host veth address: %w", err)
+		}
 	}
 	if err := netlink.LinkSetUp(hostLink); err != nil {
 		return fmt.Errorf("while bringing up host veth: %w", err)
@@ -565,11 +592,13 @@ func SetupActorNetwork(ctx context.Context, cfg NetworkConfig) (retErr error) {
 		return fmt.Errorf("while configuring actor veth in interior netns: %w", err)
 	}
 
-	if err := EnableIPv4Forwarding(); err != nil {
-		return err
-	}
-	if err := InstallActorNftablesRules(cfg.EgressRedirectPort); err != nil {
-		return err
+	if !cfg.Anchored {
+		if err := EnableIPv4Forwarding(); err != nil {
+			return err
+		}
+		if err := InstallActorNftablesRules(cfg.EgressRedirectPort); err != nil {
+			return err
+		}
 	}
 
 	if cfg.DumpNetInfo {

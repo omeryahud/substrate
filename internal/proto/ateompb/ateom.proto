@@ -146,6 +146,9 @@ message EgressGateway {
 message ConnectionAnchor {
   // attach_address is the anchor's attach listener as host:port.
   string attach_address = 1;
+  // control_address is the anchor's control listener as host:port, which
+  // ateom uses for readiness probes into the actor's stack.
+  string control_address = 2;
 }
 
 // WorkloadSpec parallels Pod, but with far fewer configurable fields.

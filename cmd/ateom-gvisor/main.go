@@ -36,6 +36,7 @@ import (
 	"cloud.google.com/go/compute/metadata"
 	"github.com/agent-substrate/substrate/cmd/ateom-gvisor/internal/cgroupstats"
 	"github.com/agent-substrate/substrate/internal/actorlog"
+	"github.com/agent-substrate/substrate/internal/anchortun"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
 	"github.com/agent-substrate/substrate/internal/ateomnet"
 	"github.com/agent-substrate/substrate/internal/ateompath"
@@ -313,6 +314,9 @@ type activeRPCInfo struct {
 type workloadSession struct {
 	rcmd       *runsc
 	containers []string
+	// stopShuttle stops the frame shuttle of an anchored activation, or is nil
+	// when the actor uses the worker's local atunnel path.
+	stopShuttle func()
 }
 
 type cancelableMutex struct {
@@ -618,19 +622,37 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	//   * Correct runsc version is downloaded and placed on disk.
 	//   * All OCI bundles are set up, including for "pause" container.
 
-	egress, err := s.prepareActorEgress(ctx, req.GetActorUid(), req.GetEgressGateway())
-	if err != nil {
-		return nil, err
+	anchored := req.GetAnchor() != nil
+	var egress *actorEgress
+	if !anchored {
+		var err error
+		egress, err = s.prepareActorEgress(ctx, req.GetActorUid(), req.GetEgressGateway())
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := ateomnet.SetupActorNetwork(ctx, ateomnet.NetworkConfig{
 		InteriorNetNS:      s.interiorNetNS,
 		DumpNetInfo:        true,
-		EgressRedirectPort: s.egressRedirectPort(req.GetEgressGateway() != nil),
+		EgressRedirectPort: s.egressRedirectPort(!anchored && req.GetEgressGateway() != nil),
+		Anchored:           anchored,
 	}); err != nil {
 		// Cleared here as well as in the deferred cleanup below, because that
 		// defer is not registered until after this check.
 		s.activeActor.Store(nil)
 		return nil, fmt.Errorf("while setting up actor network: %w", err)
+	}
+	var stopShuttle func()
+	if anchored {
+		stop, err := s.attachAnchor(ctx, req.GetAnchor(), req.GetAtespace(), req.GetActorName(), anchortun.BootFresh)
+		if err != nil {
+			s.activeActor.Store(nil)
+			if cerr := ateomnet.CleanupActorNetwork(ctx, s.interiorNetNS); cerr != nil {
+				slog.WarnContext(ctx, "Failed to clean up actor network after anchor attach failure", slog.Any("err", cerr))
+			}
+			return nil, fmt.Errorf("while attaching to the connection anchor: %w", err)
+		}
+		stopShuttle = stop
 	}
 	rcmd := &runsc{
 		path:     req.GetRunscPath(),
@@ -643,6 +665,9 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 			s.activeActor.Store(nil)
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
+			if stopShuttle != nil {
+				stopShuttle()
+			}
 			if err := s.deactivateActorNetworking(cleanupCtx); err != nil {
 				slog.WarnContext(cleanupCtx, "Failed to deactivate actor networking after Run failure", slog.Any("err", err))
 			}
@@ -700,15 +725,21 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	}
 
 	// Block until every readyz-enabled container reports 200.
-	if err := readyz.WaitAll(ctx, req.GetSpec().GetContainers(), ateomnet.ActorVethIP); err != nil {
-		return nil, fmt.Errorf("while waiting for container readyz: %w", err)
-	}
-	if err := s.activateActorNetworking(req.GetAtespace(), req.GetActorName(), egress); err != nil {
-		return nil, err
+	if anchored {
+		if err := s.waitReadyViaAnchor(ctx, req.GetAnchor(), req.GetAtespace(), req.GetActorName(), req.GetSpec().GetContainers()); err != nil {
+			return nil, fmt.Errorf("while waiting for container readyz via anchor: %w", err)
+		}
+	} else {
+		if err := readyz.WaitAll(ctx, req.GetSpec().GetContainers(), ateomnet.ActorVethIP); err != nil {
+			return nil, fmt.Errorf("while waiting for container readyz: %w", err)
+		}
+		if err := s.activateActorNetworking(req.GetAtespace(), req.GetActorName(), egress); err != nil {
+			return nil, err
+		}
 	}
 
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor started", attribution)
-	s.activeSession = &workloadSession{rcmd: rcmd, containers: containerNames(req.GetSpec().GetContainers())}
+	s.activeSession = &workloadSession{rcmd: rcmd, containers: containerNames(req.GetSpec().GetContainers()), stopShuttle: stopShuttle}
 
 	return &ateompb.RunWorkloadResponse{}, nil
 }
@@ -806,6 +837,12 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 			"err", err)
 	}
 
+	// The checkpoint is on disk, so the tunnel can go: the anchor sees the
+	// detach and holds the actor's connections until the next attach.
+	if s.activeSession != nil && s.activeSession.stopShuttle != nil {
+		s.activeSession.stopShuttle()
+	}
+
 	if err := ateomnet.CleanupActorNetwork(ctx, s.interiorNetNS); err != nil {
 		slog.WarnContext(ctx, "Failed to clean up actor network after checkpoint", slog.Any("err", err))
 	}
@@ -894,18 +931,43 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	//   * All OCI bundles are set up, including for "pause" container.
 	//   * Checkpoint downloaded and placed on disk
 
-	egress, err := s.prepareActorEgress(ctx, req.GetActorUid(), req.GetEgressGateway())
-	if err != nil {
-		return nil, err
+	anchored := req.GetAnchor() != nil
+	var egress *actorEgress
+	if !anchored {
+		var err error
+		egress, err = s.prepareActorEgress(ctx, req.GetActorUid(), req.GetEgressGateway())
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := ateomnet.SetupActorNetwork(ctx, ateomnet.NetworkConfig{
 		InteriorNetNS:      s.interiorNetNS,
 		DumpNetInfo:        true,
-		EgressRedirectPort: s.egressRedirectPort(req.GetEgressGateway() != nil),
+		EgressRedirectPort: s.egressRedirectPort(!anchored && req.GetEgressGateway() != nil),
+		Anchored:           anchored,
 	}); err != nil {
 		// Same as the Run path: the defer below is not registered yet.
 		s.activeActor.Store(nil)
 		return nil, fmt.Errorf("while setting up actor network: %w", err)
+	}
+	var stopShuttle func()
+	if anchored {
+		// A FULL restore brings the process and its connections back, so the
+		// anchor keeps what it held. A DATA restore is a fresh process, so the
+		// anchor must drop any held connections.
+		boot := anchortun.BootRestore
+		if req.GetScope() != ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL {
+			boot = anchortun.BootFresh
+		}
+		stop, err := s.attachAnchor(ctx, req.GetAnchor(), req.GetAtespace(), req.GetActorName(), boot)
+		if err != nil {
+			s.activeActor.Store(nil)
+			if cerr := ateomnet.CleanupActorNetwork(ctx, s.interiorNetNS); cerr != nil {
+				slog.WarnContext(ctx, "Failed to clean up actor network after anchor attach failure", slog.Any("err", cerr))
+			}
+			return nil, fmt.Errorf("while attaching to the connection anchor: %w", err)
+		}
+		stopShuttle = stop
 	}
 	rcmd := &runsc{
 		path:     req.GetRunscPath(),
@@ -918,6 +980,9 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 			s.activeActor.Store(nil)
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
+			if stopShuttle != nil {
+				stopShuttle()
+			}
 			if err := s.deactivateActorNetworking(cleanupCtx); err != nil {
 				slog.WarnContext(cleanupCtx, "Failed to deactivate actor networking after Restore failure", slog.Any("err", err))
 			}
@@ -1001,15 +1066,21 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	}
 
 	// Block until every readyz-enabled container reports 200.
-	if err := readyz.WaitAll(ctx, req.GetSpec().GetContainers(), ateomnet.ActorVethIP); err != nil {
-		return nil, fmt.Errorf("while waiting for container readyz: %w", err)
-	}
-	if err := s.activateActorNetworking(req.GetAtespace(), req.GetActorName(), egress); err != nil {
-		return nil, err
+	if anchored {
+		if err := s.waitReadyViaAnchor(ctx, req.GetAnchor(), req.GetAtespace(), req.GetActorName(), req.GetSpec().GetContainers()); err != nil {
+			return nil, fmt.Errorf("while waiting for container readyz via anchor: %w", err)
+		}
+	} else {
+		if err := readyz.WaitAll(ctx, req.GetSpec().GetContainers(), ateomnet.ActorVethIP); err != nil {
+			return nil, fmt.Errorf("while waiting for container readyz: %w", err)
+		}
+		if err := s.activateActorNetworking(req.GetAtespace(), req.GetActorName(), egress); err != nil {
+			return nil, err
+		}
 	}
 
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor restored", attribution)
-	s.activeSession = &workloadSession{rcmd: rcmd, containers: containerNames(req.GetSpec().GetContainers())}
+	s.activeSession = &workloadSession{rcmd: rcmd, containers: containerNames(req.GetSpec().GetContainers()), stopShuttle: stopShuttle}
 
 	return &ateompb.RestoreWorkloadResponse{}, nil
 }
