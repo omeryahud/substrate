@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/agent-substrate/substrate/internal/anchortun"
 	"github.com/agent-substrate/substrate/internal/ateomnet"
 
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/ch"
@@ -64,6 +65,8 @@ type runningActor struct {
 	vfsdCmd *exec.Cmd
 	// apiSocket is the CH api-socket for this ateom-owned VMM.
 	apiSocket string
+	// stopShuttle stops the frame shuttle of an anchored activation, or is nil.
+	stopShuttle func()
 
 	// restoreSourceDir is the snapshot dir this actor was OnDemand-restored from
 	// (CH demand-pages its guest RAM from it). Set when restored via OnDemand.
@@ -279,6 +282,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		containers:    req.GetSpec().GetContainers(),
 		assetPaths:    req.GetRuntimeAssetPaths(),
 		egressGateway: req.GetEgressGateway(),
+		anchor:        req.GetAnchor(),
 		size:          sizing.FromLimits(req.GetCpuMilli(), req.GetMemoryBytes()),
 	}
 
@@ -318,6 +322,9 @@ type actorBootParams struct {
 	assetPaths   map[string]string
 	// egressGateway is nil unless actor TCP should be redirected through atunnel.
 	egressGateway *ateompb.EgressGateway
+	// anchor is set when the actor's connections terminate in the connection
+	// anchor: the worker then only shuttles frames and probes through it.
+	anchor *ateompb.ConnectionAnchor
 	// size is the actor's declared limits (from the ActorTemplate), supplied on
 	// the RunWorkload / RestoreWorkload RPC. It sizes the VM (vCPUs, memory) and
 	// the guest container cgroup. Zero fields keep the kata defaults.
@@ -389,9 +396,15 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 		return fmt.Errorf("ateom-microvm requires %q and %q asset paths", assetKernel, assetImage)
 	}
 	rr := s.resolveRuntime(paths)
-	egress, err := s.prepareActorEgress(ctx, p.actorUID, p.egressGateway)
-	if err != nil {
-		return err
+	// An anchored actor's egress is opened by the anchor with the actor's
+	// certificate; the worker holds no egress state for it.
+	anchored := p.anchor != nil
+	var egress *actorEgress
+	var err error
+	if !anchored {
+		if egress, err = s.prepareActorEgress(ctx, p.actorUID, p.egressGateway); err != nil {
+			return err
+		}
 	}
 
 	// Networking (host side): per-activation veth into the interior netns. The
@@ -400,12 +413,27 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 		InteriorNetNS:      s.interiorNetNS,
 		HostVethHWAddr:     hostVethHWAddr,
 		SweepInteriorLinks: true,
-		EgressRedirectPort: s.egressRedirectPort(p.egressGateway != nil),
+		Anchored:           anchored,
+		EgressRedirectPort: s.egressRedirectPort(!anchored && p.egressGateway != nil),
 	}); err != nil {
 		return fmt.Errorf("while setting up actor network: %w", err)
 	}
+	var stopShuttle func()
+	if anchored {
+		stop, err := s.attachAnchor(ctx, p.anchor, p.egressGateway, p.actorRef, p.actorUID, anchortun.BootFresh)
+		if err != nil {
+			if cerr := ateomnet.CleanupActorNetwork(ctx, s.interiorNetNS); cerr != nil {
+				slog.WarnContext(ctx, "Failed to clean up actor network after anchor attach failure", slog.Any("err", cerr))
+			}
+			return fmt.Errorf("while attaching to the connection anchor: %w", err)
+		}
+		stopShuttle = stop
+	}
 	defer func() {
 		if retErr != nil {
+			if stopShuttle != nil {
+				stopShuttle()
+			}
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
 			if cleanupErr := s.deactivateActorNetworking(cleanupCtx); cleanupErr != nil {
@@ -572,7 +600,11 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 	tContainers := time.Now()
 
 	// Block until every readyz-enabled container reports 200.
-	if err := readyz.WaitAll(ctx, containers, ateomnet.ActorVethIP); err != nil {
+	if anchored {
+		if err := s.waitReadyViaAnchor(ctx, p.anchor, p.actorRef, containers); err != nil {
+			return fmt.Errorf("while waiting for container readyz via anchor: %w", err)
+		}
+	} else if err := readyz.WaitAll(ctx, containers, ateomnet.ActorVethIP); err != nil {
 		return fmt.Errorf("while waiting for container readyz: %w", err)
 	}
 
@@ -585,9 +617,11 @@ func (s *AteomService) coldBootActor(ctx context.Context, p actorBootParams) (re
 		slog.Duration("readyz", time.Since(tContainers)),
 		slog.Duration("since_boot", time.Since(tBooted)))
 
-	ra := &runningActor{chCmd: chCmd, vfsdCmd: vfsdCmd, apiSocket: apiSocket, baseID: actorUID, guestAgent: ac, workloadIDs: workloadIDs(ctrs)}
-	if err := s.activateActorNetworking(p.actorRef.Atespace, p.actorRef.Name, egress); err != nil {
-		return err
+	ra := &runningActor{chCmd: chCmd, vfsdCmd: vfsdCmd, apiSocket: apiSocket, baseID: actorUID, guestAgent: ac, workloadIDs: workloadIDs(ctrs), stopShuttle: stopShuttle}
+	if !anchored {
+		if err := s.activateActorNetworking(p.actorRef.Atespace, p.actorRef.Name, egress); err != nil {
+			return err
+		}
 	}
 	s.running[actorUID] = ra
 

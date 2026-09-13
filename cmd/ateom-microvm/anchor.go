@@ -27,19 +27,20 @@ import (
 
 func (s *AteomService) anchorCredentials() anchorclient.Credentials {
 	return anchorclient.Credentials{
-		WorkerPodUID:         *podUID,
+		WorkerPodUID:         s.podUID,
 		CredentialBundlePath: s.workerCredentialBundlePath,
 		TrustBundlePath:      s.egressGatewayTrustBundlePath,
 	}
 }
 
 // attachAnchor starts the frame shuttle for an anchored activation and returns
-// the function that stops it.
-func (s *AteomService) attachAnchor(ctx context.Context, anchor *ateompb.ConnectionAnchor, egress *ateompb.EgressGateway, atespace, actorName, actorUID string, boot anchortun.BootKind) (func(), error) {
-	return anchorclient.Attach(ctx, s.anchorCredentials(), anchor, egress, resources.ActorRef{Atespace: atespace, Name: actorName}, actorUID, boot)
+// the function that stops it. The guest's frames reach the anchor exactly as a
+// gVisor sandbox's do: the tap is mirrored onto the same veth.
+func (s *AteomService) attachAnchor(ctx context.Context, anchor *ateompb.ConnectionAnchor, egress *ateompb.EgressGateway, ref resources.ActorRef, actorUID string, boot anchortun.BootKind) (func(), error) {
+	return anchorclient.Attach(ctx, s.anchorCredentials(), anchor, egress, ref, actorUID, boot)
 }
 
 // waitReadyViaAnchor is readyz.WaitAll for an anchored actor.
-func (s *AteomService) waitReadyViaAnchor(ctx context.Context, anchor *ateompb.ConnectionAnchor, atespace, actorName string, containers []*ateompb.Container) error {
-	return anchorclient.WaitReady(ctx, s.anchorCredentials(), anchor, resources.ActorRef{Atespace: atespace, Name: actorName}, containers)
+func (s *AteomService) waitReadyViaAnchor(ctx context.Context, anchor *ateompb.ConnectionAnchor, ref resources.ActorRef, containers []*ateompb.Container) error {
+	return anchorclient.WaitReady(ctx, s.anchorCredentials(), anchor, ref, containers)
 }

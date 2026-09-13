@@ -316,6 +316,13 @@ func (s *AteomService) teardownActor(ctx context.Context, id string, ra *running
 	}
 
 	if ra != nil {
+		// The guest is paused or gone, so the anchor's tunnel has nothing more
+		// to carry; the anchor holds the actor's connections from here.
+		if ra.stopShuttle != nil {
+			ra.stopShuttle()
+			ra.stopShuttle = nil
+		}
+
 		// Close the kata-agent client kept open for stdout/stderr forwarding. This
 		// fails the forwarding goroutines' in-flight ReadStdout/ReadStderr calls, so
 		// they return io.EOF and exit (no goroutine leak). Guarded so a second

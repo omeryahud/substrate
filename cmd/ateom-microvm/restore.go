@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agent-substrate/substrate/internal/anchortun"
 	"github.com/agent-substrate/substrate/internal/ateomnet"
 
 	"github.com/agent-substrate/substrate/cmd/ateom-microvm/internal/ch"
@@ -105,6 +106,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		containers:    req.GetSpec().GetContainers(),
 		assetPaths:    req.GetRuntimeAssetPaths(),
 		egressGateway: req.GetEgressGateway(),
+		anchor:        req.GetAnchor(),
 		size:          sizing.FromLimits(req.GetCpuMilli(), req.GetMemoryBytes()),
 	}
 	restoreDir := ateompath.RestoreStateDir(p.actorUID)
@@ -178,9 +180,13 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	actorUID := p.actorUID
 
 	rr := s.resolveRuntime(p.assetPaths)
-	egress, err := s.prepareActorEgress(ctx, p.actorUID, p.egressGateway)
-	if err != nil {
-		return err
+	anchored := p.anchor != nil
+	var egress *actorEgress
+	var err error
+	if !anchored {
+		if egress, err = s.prepareActorEgress(ctx, p.actorUID, p.egressGateway); err != nil {
+			return err
+		}
 	}
 	kata.CleanupSandboxState(ctx, actorUID)
 
@@ -278,12 +284,29 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 		InteriorNetNS:      s.interiorNetNS,
 		HostVethHWAddr:     hostVethHWAddr,
 		SweepInteriorLinks: true,
-		EgressRedirectPort: s.egressRedirectPort(p.egressGateway != nil),
+		Anchored:           anchored,
+		EgressRedirectPort: s.egressRedirectPort(!anchored && p.egressGateway != nil),
 	}); err != nil {
 		return fmt.Errorf("while setting up actor network: %w", err)
 	}
+	// A full restore brings the guest's connections back, so the anchor keeps
+	// what it held for this actor.
+	var stopShuttle func()
+	if anchored {
+		stop, err := s.attachAnchor(ctx, p.anchor, p.egressGateway, p.actorRef, p.actorUID, anchortun.BootRestore)
+		if err != nil {
+			if cerr := ateomnet.CleanupActorNetwork(ctx, s.interiorNetNS); cerr != nil {
+				slog.WarnContext(ctx, "Failed to clean up actor network after anchor attach failure", slog.Any("err", cerr))
+			}
+			return fmt.Errorf("while attaching to the connection anchor: %w", err)
+		}
+		stopShuttle = stop
+	}
 	defer func() {
 		if retErr != nil {
+			if stopShuttle != nil {
+				stopShuttle()
+			}
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
 			if cleanupErr := s.deactivateActorNetworking(cleanupCtx); cleanupErr != nil {
@@ -362,7 +385,11 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 	tResume := time.Now()
 
 	// Block until every readyz-enabled container reports 200.
-	if err := readyz.WaitAll(ctx, containers, ateomnet.ActorVethIP); err != nil {
+	if anchored {
+		if err := s.waitReadyViaAnchor(ctx, p.anchor, p.actorRef, containers); err != nil {
+			return fmt.Errorf("while waiting for container readyz via anchor: %w", err)
+		}
+	} else if err := readyz.WaitAll(ctx, containers, ateomnet.ActorVethIP); err != nil {
 		return fmt.Errorf("while waiting for container readyz: %w", err)
 	}
 
@@ -424,8 +451,11 @@ func (s *AteomService) restoreFullScope(ctx context.Context, p actorBootParams, 
 		}
 	}
 
-	if err := s.activateActorNetworking(p.actorRef.Atespace, p.actorRef.Name, egress); err != nil {
-		return err
+	ra.stopShuttle = stopShuttle
+	if !anchored {
+		if err := s.activateActorNetworking(p.actorRef.Atespace, p.actorRef.Name, egress); err != nil {
+			return err
+		}
 	}
 	s.running[actorUID] = ra
 
