@@ -121,6 +121,8 @@ func (a *Anchor) activateEgress(ctx context.Context, entry *actorEntry, gateway 
 		CredentialBundlePath: a.cfg.IngressCredentialBundlePath,
 		TrustBundlePath:      a.cfg.TrustBundlePath,
 		ExpectedActorUID:     entry.actorUID,
+		Atespace:             entry.ref.Atespace,
+		ActorName:            entry.ref.Name,
 	})
 	if err != nil {
 		return fmt.Errorf("anchor: configuring the certificate broker: %w", err)

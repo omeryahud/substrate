@@ -42,6 +42,8 @@ import (
 type BrokerCertificateSource struct {
 	socketPath       string
 	expectedActorUID string
+	atespace         string
+	actorName        string
 	tlsConfig        *tls.Config
 	privateKey       *ecdsa.PrivateKey
 
@@ -61,6 +63,11 @@ type BrokerConfig struct {
 	// ExpectedActorUID prevents a mint started for an old activation from
 	// receiving the newly assigned actor's certificate.
 	ExpectedActorUID string
+	// Atespace and ActorName name the actor for a caller that holds many
+	// actors, such as the connection anchor. A worker leaves them empty:
+	// ateapi resolves its actor from its assignment.
+	Atespace  string
+	ActorName string
 }
 
 // NewBrokerCertificateSource creates one actor key for this activation. The key
@@ -121,7 +128,14 @@ func NewBrokerCertificateSource(cfg BrokerConfig) (*BrokerCertificateSource, err
 		},
 	}
 
-	return &BrokerCertificateSource{socketPath: cfg.SocketPath, expectedActorUID: cfg.ExpectedActorUID, tlsConfig: tlsConfig, privateKey: privateKey}, nil
+	return &BrokerCertificateSource{
+		socketPath:       cfg.SocketPath,
+		expectedActorUID: cfg.ExpectedActorUID,
+		atespace:         cfg.Atespace,
+		actorName:        cfg.ActorName,
+		tlsConfig:        tlsConfig,
+		privateKey:       privateKey,
+	}, nil
 }
 
 // Mint requests and installs a fresh certificate for the source's existing
@@ -146,6 +160,8 @@ func (s *BrokerCertificateSource) Mint(ctx context.Context) (time.Time, error) {
 	resp, err := ateletpb.NewCredentialBrokerClient(conn).MintActorCertificate(ctx, &ateletpb.MintActorCertificateRequest{
 		CertificateSigningRequest: csr,
 		ExpectedActorUid:          s.expectedActorUID,
+		Atespace:                  s.atespace,
+		ActorName:                 s.actorName,
 	})
 	if err != nil {
 		return time.Time{}, fmt.Errorf("atunnel: mint actor certificate: %w", err)
