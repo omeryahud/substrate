@@ -49,6 +49,7 @@ type Stack struct {
 	link      *channel.Endpoint
 	addr      tcpip.Address
 	prefixLen int
+	gate      *writeGate
 }
 
 // NewStack builds a stack that owns localCIDR (for example 169.254.17.1/30 for
@@ -71,7 +72,7 @@ func NewStack(localIP string, prefixLen int) (*Stack, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Stack{stack: s, link: link, addr: addr, prefixLen: prefixLen}, nil
+	return &Stack{stack: s, link: link, addr: addr, prefixLen: prefixLen, gate: newWriteGate()}, nil
 }
 
 // Stack returns the underlying tcpip stack, for the gonet dial and listen

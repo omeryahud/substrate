@@ -78,9 +78,11 @@ var (
 	actorIDJWTPoolFile   = pflag.String("actor-id-jwt-pool", "", "The file that contains the serialized JWT authority pool for signing actor JWTs")
 	egressGatewayAddress = pflag.String("egress-gateway-address", "", "Address of the egress PEP. Empty disables tunneled egress.")
 
-	anchorIngressAddress = pflag.String("anchor-address", "", "host:port of the connection anchor's ingress listener. With --anchor-attach-address and --anchor-control-address, lets ActorTemplates annotated ate.dev/connection-policy=Preserve keep open TCP connections across suspend and resume. Empty disables anchoring.")
-	anchorAttachAddress  = pflag.String("anchor-attach-address", "", "host:port of the connection anchor's attach listener that workers tunnel actor frames to.")
-	anchorControlAddress = pflag.String("anchor-control-address", "", "host:port of the connection anchor's control listener that workers probe actor readiness through.")
+	anchorIngressAddress   = pflag.String("anchor-address", "", "host:port of the connection anchor's ingress listener. With --anchor-attach-address and --anchor-control-address, lets ActorTemplates annotated ate.dev/connection-policy=Preserve keep open TCP connections across suspend and resume. Empty disables anchoring.")
+	anchorAttachAddress    = pflag.String("anchor-attach-address", "", "host:port of the connection anchor's attach listener that workers tunnel actor frames to.")
+	anchorControlAddress   = pflag.String("anchor-control-address", "", "host:port of the connection anchor's control listener that workers probe actor readiness through.")
+	anchorClientCredBundle = pflag.String("anchor-client-cred-bundle", "", "Credential bundle presented to the connection anchor's control listener, for quiesce before checkpoint and release on delete. Empty skips those calls.")
+	anchorTrustBundle      = pflag.String("anchor-trust-bundle", "", "PEM trust bundle that verifies the connection anchor's serving certificate.")
 
 	actorIDCAPoolFile      = pflag.String("actor-id-ca-pool", "", "The file that contains the CA pool for signing actor JWTs")
 	podIdentityCACerts     = pflag.String("pod-identity-ca-certs", "", "The file that contains the pod-identity CA bundle, used both for verifying client certificates presented to the gRPC server and for verifying atelet serving certificates when dialing atelet. If empty, client-cert verification is disabled and atelet dials will fail.")
@@ -198,9 +200,11 @@ func main() {
 	volPlugins := make(map[string]volume.VolumePluginControlPlane)
 	ateletDialer := controlapi.NewAteletDialer(workerPodInformer.GetIndexer(), ateletPodInformer.GetIndexer(), *ateletClientCredBundle, *podIdentityCACerts)
 	anchorConfig := controlapi.AnchorConfig{
-		IngressAddress: *anchorIngressAddress,
-		AttachAddress:  *anchorAttachAddress,
-		ControlAddress: *anchorControlAddress,
+		IngressAddress:       *anchorIngressAddress,
+		AttachAddress:        *anchorAttachAddress,
+		ControlAddress:       *anchorControlAddress,
+		ClientCredBundlePath: *anchorClientCredBundle,
+		TrustBundlePath:      *anchorTrustBundle,
 	}
 	sm := controlapi.NewService(persistence, workerCache, actorTemplateLister, workerPoolLister, sandboxConfigLister, csiDriverConfigLister, storageClassLister, ateletDialer, instruments, *egressGatewayAddress, anchorConfig, volPlugins)
 

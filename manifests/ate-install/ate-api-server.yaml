@@ -106,6 +106,11 @@ spec:
           # transparently redirected (nftables) into atunnel, which wraps it in
           # mTLS + HTTP CONNECT to the egress gateway.
           - --egress-gateway-address=atenet-egress.ate-system.svc:443
+          # ateapi's own pod identity and the servicedns trust bundle, to call
+          # the connection anchor's control listener (quiesce before a
+          # checkpoint, release on delete).
+          - --anchor-client-cred-bundle=/run/podidentity.podcert.ate.dev/credential-bundle.pem
+          - --anchor-trust-bundle=/run/servicedns.podcert.ate.dev/trust-bundle.pem
           # The connection anchor. ActorTemplates annotated
           # ate.dev/connection-policy=Preserve keep their open TCP connections
           # across suspend and resume: their ingress goes to the anchor and

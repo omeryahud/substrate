@@ -251,6 +251,7 @@ func (w *ActorWorkflow) ensureAteletSuspended(ctx context.Context, actorRef reso
 	}
 	wireSnapshotScope = ateattr.SnapshotScopeValue(req.Scope)
 
+	w.quiesceAnchor(ctx, actor, actorTemplate)
 	_, err = client.Checkpoint(ctx, req)
 	return wireSnapshotScope, maybeCrashActor(ctx, w.store, actorRef, err, "while checkpointing workload", ateattr.OperationSuspend)
 }

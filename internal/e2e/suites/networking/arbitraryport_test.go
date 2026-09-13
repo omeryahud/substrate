@@ -49,8 +49,19 @@ const counterExtraPort = 9090
 // established tunnel and inspect *that* response, which is where actor
 // resolution and atunnel's dial to the actor's pod actually happen.
 func TestActorArbitraryPortAccess(t *testing.T) {
+	runArbitraryPortAccess(t, "arbitraryport", e2e.CounterFixture())
+}
+
+// TestActorArbitraryPortAccessPreserve is the same contract for an Actor
+// whose connections terminate in the connection anchor: the CONNECT-tunneled
+// request reaches the extra port through the anchor's stack.
+func TestActorArbitraryPortAccessPreserve(t *testing.T) {
+	runArbitraryPortAccess(t, "arbitraryport-preserve", counterPreserveFixture())
+}
+
+func runArbitraryPortAccess(t *testing.T, prefix string, fixture e2e.Fixture) {
 	ctx := context.Background()
-	actorName, _ := createAndResumeActor(t, ctx, "arbitraryport", e2e.CounterFixture())
+	actorName, _ := createAndResumeActor(t, ctx, prefix, fixture)
 	actorRef := resources.ActorRef{Atespace: networkingAtespace, Name: actorName}
 	router := mustRouterClient(t, ctx)
 	defer router.Close()

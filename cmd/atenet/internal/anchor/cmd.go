@@ -58,6 +58,11 @@ func NewAnchorCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cfg.Egress.BrokerSocketPath, "credential-broker-socket", ateompath.CredentialBrokerSocket, "Node-local atelet socket that mints actor certificates for egress; empty disables actor egress")
 	cmd.Flags().StringVar(&cfg.Egress.GatewayTrustBundlePath, "egress-gateway-trust-bundle", "/run/servicedns.podcert.ate.dev/trust-bundle.pem", "PEM trust bundle that verifies the egress gateway's serving certificate")
 	cmd.Flags().StringVar(&cfg.Egress.DNSUpstream, "dns-upstream", "", "Resolver (host:port) actor DNS queries are forwarded to; empty uses /etc/resolv.conf")
+	cmd.Flags().StringVar(&cfg.ConnectListen, "connect-listen", ":444", "mTLS listener for the router's raw CONNECT tunnels into actors; empty disables it")
+	cmd.Flags().StringVar(&cfg.Ateapi.Address, "ateapi-address", "", "gRPC dial target of ateapi; with --ateapi-ca-file and --ateapi-client-cert, every attach is checked against the actor's assignment. Empty skips the check")
+	cmd.Flags().StringVar(&cfg.Ateapi.CAFile, "ateapi-ca-file", "", "PEM file with CAs trusted to verify the ateapi server certificate")
+	cmd.Flags().StringVar(&cfg.Ateapi.ServerName, "ateapi-server-name", "", "Hostname expected on the ateapi server certificate")
+	cmd.Flags().StringVar(&cfg.Ateapi.ClientCertPath, "ateapi-client-cert", "", "Credential bundle presented as the client certificate when dialing ateapi")
 	cmd.Flags().StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, error")
 	return cmd
 }

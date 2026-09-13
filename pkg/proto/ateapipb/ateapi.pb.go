@@ -1114,6 +1114,11 @@ type WorkerAssignment struct {
 	WorkerPodUid string `protobuf:"bytes,4,opt,name=worker_pod_uid,json=workerPodUid,proto3" json:"worker_pod_uid,omitempty"`
 	// worker_pod_ip is the IP of worker_pod.
 	WorkerPodIp string `protobuf:"bytes,5,opt,name=worker_pod_ip,json=workerPodIp,proto3" json:"worker_pod_ip,omitempty"`
+	// activation_id names this placement of the Actor on its worker. The
+	// worker's tunnel to the connection anchor carries it, so the anchor can
+	// tell a tunnel of this activation from one left over by an earlier
+	// placement. Minted per assignment; empty when the Actor is not anchored.
+	ActivationId string `protobuf:"bytes,8,opt,name=activation_id,json=activationId,proto3" json:"activation_id,omitempty"`
 	// anchor_address is the connection anchor's ingress listener (host:port)
 	// for an Actor whose connections are preserved across suspend and resume.
 	// The router sends ingress there instead of to worker_pod_ip, because the
@@ -1192,6 +1197,13 @@ func (x *WorkerAssignment) GetWorkerPodUid() string {
 func (x *WorkerAssignment) GetWorkerPodIp() string {
 	if x != nil {
 		return x.WorkerPodIp
+	}
+	return ""
+}
+
+func (x *WorkerAssignment) GetActivationId() string {
+	if x != nil {
+		return x.ActivationId
 	}
 	return ""
 }
@@ -5361,7 +5373,7 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x0fsource_snapshot\x18\t \x01(\v2!.ateapi.ActorSourceSnapshotStatusR\x0esourceSnapshot\"m\n" +
 	"\x19ActorSourceSnapshotStatus\x12-\n" +
 	"\bsnapshot\x18\x01 \x01(\v2\x11.ateapi.ObjectRefR\bsnapshot\x12!\n" +
-	"\fsnapshot_uid\x18\x02 \x01(\tR\vsnapshotUid\"\x99\x02\n" +
+	"\fsnapshot_uid\x18\x02 \x01(\tR\vsnapshotUid\"\xbe\x02\n" +
 	"\x10WorkerAssignment\x12)\n" +
 	"\x06worker\x18\x06 \x01(\v2\x11.ateapi.ObjectRefR\x06worker\x12)\n" +
 	"\x10worker_namespace\x18\x01 \x01(\tR\x0fworkerNamespace\x12\x1f\n" +
@@ -5370,7 +5382,8 @@ const file_ateapi_proto_rawDesc = "" +
 	"\n" +
 	"worker_pod\x18\x03 \x01(\tR\tworkerPod\x12$\n" +
 	"\x0eworker_pod_uid\x18\x04 \x01(\tR\fworkerPodUid\x12\"\n" +
-	"\rworker_pod_ip\x18\x05 \x01(\tR\vworkerPodIp\x12%\n" +
+	"\rworker_pod_ip\x18\x05 \x01(\tR\vworkerPodIp\x12#\n" +
+	"\ractivation_id\x18\b \x01(\tR\factivationId\x12%\n" +
 	"\x0eanchor_address\x18\a \x01(\tR\ranchorAddress\"z\n" +
 	"\rActorSnapshot\x124\n" +
 	"\bmetadata\x18\x01 \x01(\v2\x18.ateapi.ResourceMetadataR\bmetadata\x123\n" +

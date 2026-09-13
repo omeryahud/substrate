@@ -89,6 +89,10 @@ type Config struct {
 	LogFrames bool
 	// Egress configures actors' outbound connections and DNS.
 	Egress EgressConfig
+	// Ateapi lets the anchor check attaches against the control plane.
+	Ateapi AteapiConfig
+	// ConnectListen serves the router's raw CONNECT tunnels into actors.
+	ConnectListen string
 }
 
 // Anchor holds one network stack per actor and the listeners that reach them.
@@ -98,6 +102,8 @@ type Anchor struct {
 	metrics     *Metrics
 	now         func() time.Time
 	dnsUpstream string
+	// assignments is nil when attaches are not checked against ateapi.
+	assignments assignmentReader
 
 	mu     sync.Mutex
 	actors map[resources.ActorRef]*actorEntry
@@ -165,7 +171,13 @@ func New(cfg Config) (*Anchor, error) {
 			return nil, err
 		}
 	}
-	return &Anchor{cfg: cfg, clientCAs: pool, metrics: metrics, now: time.Now, dnsUpstream: dnsUpstream, actors: map[resources.ActorRef]*actorEntry{}}, nil
+	var assignments assignmentReader
+	if cfg.Ateapi.enabled() {
+		if assignments, err = newAssignmentReader(cfg.Ateapi); err != nil {
+			return nil, err
+		}
+	}
+	return &Anchor{cfg: cfg, clientCAs: pool, metrics: metrics, now: time.Now, dnsUpstream: dnsUpstream, assignments: assignments, actors: map[resources.ActorRef]*actorEntry{}}, nil
 }
 
 func loadCredentialBundle(path string) (*tls.Certificate, error) {
@@ -252,16 +264,23 @@ func (a *Anchor) Run(ctx context.Context) error {
 	ingressSrv := &http.Server{Handler: a, TLSConfig: a.tlsConfig(a.cfg.IngressCredentialBundlePath, a.verifyRouter), ReadHeaderTimeout: headerTimeout}
 	controlMux := http.NewServeMux()
 	controlMux.HandleFunc("/probe", a.serveProbe)
+	controlMux.HandleFunc("/quiesce", a.serveQuiesce)
+	controlMux.HandleFunc("/release", a.serveRelease)
 	controlSrv := &http.Server{Handler: controlMux, TLSConfig: a.tlsConfig(a.cfg.CredentialBundlePath, verifyWorkload), ReadHeaderTimeout: headerTimeout}
 	attachTLS := tls.NewListener(attachLis, a.tlsConfig(a.cfg.CredentialBundlePath, verifyWorkload))
 
-	errc := make(chan error, 3)
+	errc := make(chan error, 4)
 	go func() { errc <- ingressSrv.ServeTLS(ingressLis, "", "") }()
 	go func() { errc <- controlSrv.ServeTLS(controlLis, "", "") }()
 	go func() { errc <- a.serveAttach(ctx, attachTLS) }()
+	connectSrv, err := a.startConnectListener(errc)
+	if err != nil {
+		return err
+	}
 	go a.sweepLoop(ctx)
 	slog.InfoContext(ctx, "anchor serving",
 		slog.String("ingress", a.cfg.IngressListen),
+		slog.String("connect", a.cfg.ConnectListen),
 		slog.String("attach", a.cfg.AttachListen),
 		slog.String("control", a.cfg.ControlListen),
 		slog.Duration("holdTTL", a.cfg.HoldTTL))
@@ -276,7 +295,27 @@ func (a *Anchor) Run(ctx context.Context) error {
 	_ = ingressSrv.Close()
 	_ = controlSrv.Close()
 	_ = attachTLS.Close()
+	if connectSrv != nil {
+		_ = connectSrv.Close()
+	}
 	return err
+}
+
+// startConnectListener serves the router's raw CONNECT tunnels, over HTTP/1.1
+// or HTTP/2 like a worker's atunnel, when a listen address is configured.
+func (a *Anchor) startConnectListener(errc chan<- error) (*http.Server, error) {
+	if a.cfg.ConnectListen == "" {
+		return nil, nil
+	}
+	lis, err := net.Listen("tcp", a.cfg.ConnectListen)
+	if err != nil {
+		return nil, fmt.Errorf("anchor: connect listen: %w", err)
+	}
+	tlsCfg := a.tlsConfig(a.cfg.IngressCredentialBundlePath, a.verifyRouter)
+	tlsCfg.NextProtos = []string{"h2", "http/1.1"}
+	srv := &http.Server{Handler: http.HandlerFunc(a.serveConnect), TLSConfig: tlsCfg, ReadHeaderTimeout: headerTimeout}
+	go func() { errc <- srv.ServeTLS(lis, "", "") }()
+	return srv, nil
 }
 
 // serveAttach accepts worker tunnels. Each stream starts with one attach
@@ -313,6 +352,16 @@ func (a *Anchor) handleAttach(ctx context.Context, conn net.Conn) {
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 
+	if err := a.verifyAttach(ctx, hdr, peerPodUID(conn)); err != nil {
+		outcome := outcomeRejectedAssignment
+		if errors.Is(err, errIdentityMismatch) {
+			outcome = outcomeRejectedIdentity
+		}
+		slog.WarnContext(ctx, "anchor attach: rejected", slog.Any("actor", hdr.Ref()), slog.String("worker", hdr.WorkerPodUID), slog.Any("err", err))
+		a.metrics.recordAttach(ctx, outcome, string(hdr.Boot))
+		return
+	}
+
 	entry, err := a.getOrCreate(ctx, hdr.Ref(), hdr.ActorUID, hdr.Boot == anchortun.BootFresh)
 	if err != nil {
 		slog.ErrorContext(ctx, "anchor attach: creating stack", slog.Any("actor", hdr.Ref()), slog.Any("err", err))
@@ -330,6 +379,7 @@ func (a *Anchor) handleAttach(ctx context.Context, conn net.Conn) {
 	entry.activationID = hdr.ActivationID
 	entry.heldSince = time.Time{}
 	entry.mu.Unlock()
+	entry.stack.Unquiesce()
 	a.metrics.addTunnels(ctx, 1)
 
 	slog.InfoContext(ctx, "anchor: actor attached",
@@ -609,7 +659,11 @@ func dialInStack(ctx context.Context, st *anchornet.Stack, addr string) (net.Con
 	}
 	actorIP := net.ParseIP(actoraddr.ActorVethIP).To4()
 	full := tcpip.FullAddress{Addr: tcpip.AddrFromSlice(actorIP), Port: uint16(port)}
-	return gonet.DialContextTCP(ctx, st.Stack(), full, ipv4.ProtocolNumber)
+	conn, err := gonet.DialContextTCP(ctx, st.Stack(), full, ipv4.ProtocolNumber)
+	if err != nil {
+		return nil, err
+	}
+	return st.GateWrites(conn), nil
 }
 
 // serveProbe runs one readiness GET inside an actor's stack for ateom, which

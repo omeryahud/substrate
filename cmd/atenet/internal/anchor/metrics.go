@@ -42,6 +42,9 @@ const (
 	egressActivationsName     = "atenet.anchor.egress.activations"
 	egressConnectionsName     = "atenet.anchor.egress.connections"
 	dnsQueriesMetricName      = "atenet.anchor.dns.queries"
+	quiesceDurationName       = "atenet.anchor.quiesce.duration"
+	releasesMetricName        = "atenet.anchor.releases"
+	connectTunnelsName        = "atenet.anchor.connect.tunnels"
 )
 
 // Outcomes for the egress activation instrument.
@@ -53,17 +56,19 @@ const (
 
 // Outcomes for the attach, ingress, and probe instruments.
 const (
-	outcomeAttached      = "attached"
-	outcomeBadHeader     = "bad_header"
-	outcomeStackError    = "stack_error"
-	outcomeProxied       = "proxied"
-	outcomeMisdirected   = "misdirected"
-	outcomeUpstreamError = "upstream_error"
-	outcomeOK            = "ok"
-	outcomeNotReady      = "not_ready"
-	outcomeFailed        = "failed"
-	outcomeNotAttached   = "not_attached"
-	outcomeBadRequest    = "bad_request"
+	outcomeAttached           = "attached"
+	outcomeBadHeader          = "bad_header"
+	outcomeStackError         = "stack_error"
+	outcomeRejectedIdentity   = "rejected_identity"
+	outcomeRejectedAssignment = "rejected_assignment"
+	outcomeProxied            = "proxied"
+	outcomeMisdirected        = "misdirected"
+	outcomeUpstreamError      = "upstream_error"
+	outcomeOK                 = "ok"
+	outcomeNotReady           = "not_ready"
+	outcomeFailed             = "failed"
+	outcomeNotAttached        = "not_attached"
+	outcomeBadRequest         = "bad_request"
 )
 
 // Directions for the frame instruments, seen from the anchor.
@@ -88,6 +93,9 @@ type Metrics struct {
 	egressActivations metric.Int64Counter
 	egressConnections metric.Int64Counter
 	dnsQueries        metric.Int64Counter
+	quiesceDuration   metric.Float64Histogram
+	releases          metric.Int64Counter
+	connectTunnels    metric.Int64Counter
 }
 
 // NewMetrics creates the anchor's instruments from the global MeterProvider.
@@ -163,7 +171,52 @@ func NewMetrics() (*Metrics, error) {
 		metric.WithDescription("actor DNS queries forwarded by the anchor, by outcome")); err != nil {
 		return nil, fmt.Errorf("create %s: %w", dnsQueriesMetricName, err)
 	}
+	if m.quiesceDuration, err = meter.Float64Histogram(quiesceDurationName,
+		metric.WithUnit("s"),
+		metric.WithDescription("time to drain an actor's stack before its checkpoint, by outcome"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5)); err != nil {
+		return nil, fmt.Errorf("create %s: %w", quiesceDurationName, err)
+	}
+	if m.releases, err = meter.Int64Counter(releasesMetricName,
+		metric.WithUnit("{release}"),
+		metric.WithDescription("release requests from the control plane, by whether a stack was dropped")); err != nil {
+		return nil, fmt.Errorf("create %s: %w", releasesMetricName, err)
+	}
+	if m.connectTunnels, err = meter.Int64Counter(connectTunnelsName,
+		metric.WithUnit("{tunnel}"),
+		metric.WithDescription("raw CONNECT tunnels the router opened into actors")); err != nil {
+		return nil, fmt.Errorf("create %s: %w", connectTunnelsName, err)
+	}
 	return m, nil
+}
+
+func (m *Metrics) recordConnect(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.connectTunnels.Add(ctx, 1)
+}
+
+func (m *Metrics) recordQuiesce(ctx context.Context, d time.Duration, drained bool) {
+	if m == nil {
+		return
+	}
+	outcome := outcomeOK
+	if !drained {
+		outcome = "timed_out"
+	}
+	m.quiesceDuration.Record(ctx, d.Seconds(), metric.WithAttributes(ateattr.AnchorOutcomeKey.String(outcome)))
+}
+
+func (m *Metrics) recordRelease(ctx context.Context, released bool) {
+	if m == nil {
+		return
+	}
+	outcome := "released"
+	if !released {
+		outcome = "not_held"
+	}
+	m.releases.Add(ctx, 1, metric.WithAttributes(ateattr.AnchorOutcomeKey.String(outcome)))
 }
 
 func (m *Metrics) recordEgressActivation(ctx context.Context, outcome string) {

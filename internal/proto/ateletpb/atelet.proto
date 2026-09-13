@@ -113,6 +113,9 @@ message ConnectionAnchor {
   // control_address is the anchor's control listener as host:port, which
   // ateom uses for readiness probes into the actor's stack.
   string control_address = 2;
+  // activation_id is the id ateapi minted for this placement, which the
+  // worker's tunnel presents to the anchor.
+  string activation_id = 3;
 }
 
 // AssetFile is one content-addressed file atelet fetches for a sandbox runtime

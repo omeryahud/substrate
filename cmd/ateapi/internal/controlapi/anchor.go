@@ -33,6 +33,11 @@ type AnchorConfig struct {
 	IngressAddress string
 	AttachAddress  string
 	ControlAddress string
+	// ClientCredBundlePath and TrustBundlePath let ateapi call the anchor's
+	// control listener (quiesce before checkpoint, release on delete). Empty
+	// leaves those calls out; the anchor's hold TTL is then the only reclaim.
+	ClientCredBundlePath string
+	TrustBundlePath      string
 }
 
 func (c AnchorConfig) enabled() bool {
@@ -50,13 +55,14 @@ func (w *ActorWorkflow) anchored(tmpl *atev1alpha1.ActorTemplate) bool {
 
 // connectionAnchor is what the worker needs to attach the Actor's frame
 // tunnel, or nil when the Actor uses the worker's local path.
-func (w *ActorWorkflow) connectionAnchor(tmpl *atev1alpha1.ActorTemplate) *ateletpb.ConnectionAnchor {
+func (w *ActorWorkflow) connectionAnchor(tmpl *atev1alpha1.ActorTemplate, activationID string) *ateletpb.ConnectionAnchor {
 	if !w.anchored(tmpl) {
 		return nil
 	}
 	return &ateletpb.ConnectionAnchor{
 		AttachAddress:  w.anchor.AttachAddress,
 		ControlAddress: w.anchor.ControlAddress,
+		ActivationId:   activationID,
 	}
 }
 

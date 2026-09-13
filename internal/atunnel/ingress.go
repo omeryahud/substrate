@@ -265,14 +265,21 @@ func (s *Server) ServeConnectHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer upstream.Close()
 
-	if r.ProtoMajor == 2 {
-		s.serveH2Connect(w, r, upstream, ctx)
-		return
-	}
-	s.serveH1Connect(w, upstream, ctx)
+	RelayConnect(ctx, w, r, upstream)
 }
 
-func (s *Server) serveH1Connect(w http.ResponseWriter, upstream net.Conn, ctx context.Context) {
+// RelayConnect answers an accepted CONNECT request and copies its tunnel to
+// upstream both ways, over HTTP/1.1 (hijacked) or HTTP/2 (streamed), until
+// either side ends or ctx is canceled. The caller owns upstream.
+func RelayConnect(ctx context.Context, w http.ResponseWriter, r *http.Request, upstream net.Conn) {
+	if r.ProtoMajor == 2 {
+		serveH2Connect(w, r, upstream, ctx)
+		return
+	}
+	serveH1Connect(w, upstream, ctx)
+}
+
+func serveH1Connect(w http.ResponseWriter, upstream net.Conn, ctx context.Context) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "CONNECT hijacking unsupported", http.StatusInternalServerError)
@@ -293,7 +300,7 @@ func (s *Server) serveH1Connect(w http.ResponseWriter, upstream net.Conn, ctx co
 	relayIngressWithHalfClose(ctx, upstream, rw, client, client)
 }
 
-func (s *Server) serveH2Connect(w http.ResponseWriter, r *http.Request, upstream net.Conn, ctx context.Context) {
+func serveH2Connect(w http.ResponseWriter, r *http.Request, upstream net.Conn, ctx context.Context) {
 	// A HTTP/2 CONNECT tunnel is a pair of streams, not a hijackable TCP
 	// socket. Send the response headers before copying so the peer can start
 	// sending DATA frames, then flush each upstream write promptly.

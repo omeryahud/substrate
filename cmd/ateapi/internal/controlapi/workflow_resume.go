@@ -16,6 +16,7 @@ package controlapi
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -511,6 +512,9 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 
 	newAssignment := workerAssignmentFrom(assignedWorker)
 	newAssignment.AnchorAddress = w.anchorIngressAddress(actorTemplate)
+	if w.anchored(actorTemplate) {
+		newAssignment.ActivationId = rand.Text()
+	}
 	storedActor, err := w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
 		toUpdate.Status.State = ateapipb.ActorState_ACTOR_STATE_RESUMING
 		toUpdate.Status.WorkerAssignment = newAssignment
@@ -638,7 +642,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		return tele, err
 	}
 	egressGateway := w.egressGateway()
-	connectionAnchor := w.connectionAnchor(actorTemplate)
+	connectionAnchor := w.connectionAnchor(actorTemplate, actor.GetStatus().GetWorkerAssignment().GetActivationId())
 
 	// The actor's declared limits ride the RPC down to the sandbox so it is sized
 	// to the actor (replacing the worker-pod downward-API approach).

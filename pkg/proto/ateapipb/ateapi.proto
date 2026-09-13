@@ -306,6 +306,12 @@ message WorkerAssignment {
   // worker_pod_ip is the IP of worker_pod.
   string worker_pod_ip = 5;
 
+  // activation_id names this placement of the Actor on its worker. The
+  // worker's tunnel to the connection anchor carries it, so the anchor can
+  // tell a tunnel of this activation from one left over by an earlier
+  // placement. Minted per assignment; empty when the Actor is not anchored.
+  string activation_id = 8;
+
   // anchor_address is the connection anchor's ingress listener (host:port)
   // for an Actor whose connections are preserved across suspend and resume.
   // The router sends ingress there instead of to worker_pod_ip, because the

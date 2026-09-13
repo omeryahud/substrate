@@ -65,9 +65,17 @@ spec:
         - --hold-ttl=24h
         - --credential-broker-socket=/var/lib/ateom-gvisor/credential-broker.sock
         - --egress-gateway-trust-bundle=/run/servicedns.podcert.ate.dev/trust-bundle.pem
+        - --connect-listen=:444
+        # Every attach is checked against the actor's assignment in ateapi.
+        - --ateapi-address=api.ate-system.svc:443
+        - --ateapi-server-name=api.ate-system.svc
+        - --ateapi-ca-file=/run/servicedns.podcert.ate.dev/trust-bundle.pem
+        - --ateapi-client-cert=/run/podidentity.podcert.ate.dev/credential-bundle.pem
         ports:
         - name: https
           containerPort: 443
+        - name: connect
+          containerPort: 444
         - name: attach
           containerPort: 445
         - name: control
@@ -144,6 +152,9 @@ spec:
   - name: https
     port: 443
     targetPort: https
+  - name: connect
+    port: 444
+    targetPort: connect
   - name: attach
     port: 445
     targetPort: attach

@@ -53,7 +53,7 @@ func NewEthernetStack(localIP string, prefixLen int, mac string) (*Stack, error)
 	if err != nil {
 		return nil, err
 	}
-	return &Stack{stack: s, link: ep, addr: addr, prefixLen: prefixLen}, nil
+	return &Stack{stack: s, link: ep, addr: addr, prefixLen: prefixLen, gate: newWriteGate()}, nil
 }
 
 // addAddressAndDefaultRoute gives the NIC localIP and a default route out of it.

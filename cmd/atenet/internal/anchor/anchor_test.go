@@ -16,6 +16,7 @@ package anchor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 	"go.opentelemetry.io/otel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"google.golang.org/grpc"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -38,6 +40,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/ateomnet/actoraddr"
 	"github.com/agent-substrate/substrate/internal/atunnel"
 	"github.com/agent-substrate/substrate/internal/resources"
+	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 )
 
 func newTestAnchor() *Anchor {
@@ -445,6 +448,140 @@ func TestVerifyPeers(t *testing.T) {
 	}
 	if err := verifyWorkload(nil); err == nil {
 		t.Error("verifyWorkload accepted a certificate without URIs")
+	}
+}
+
+// TestServeQuiesceAndRelease: quiesce holds writes toward the actor and
+// reports a drain; release drops the stack only for the named incarnation.
+func TestServeQuiesceAndRelease(t *testing.T) {
+	ctx := context.Background()
+	a := newTestAnchor()
+	ref := resources.ActorRef{Atespace: "team-a", Name: "alpha"}
+	entry, err := a.getOrCreate(ctx, ref, "uid-a", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry.mu.Lock()
+	entry.activationID = "act-1"
+	entry.mu.Unlock()
+
+	post := func(path, query string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, path+"?"+query, nil)
+		w := httptest.NewRecorder()
+		if path == "/quiesce" {
+			a.serveQuiesce(w, r)
+		} else {
+			a.serveRelease(w, r)
+		}
+		return w
+	}
+	if w := post("/quiesce", "atespace=team-a&actor=alpha&activationID=act-9"); w.Code != http.StatusConflict {
+		t.Errorf("quiesce with a stale activation = %d, want 409", w.Code)
+	}
+	w := post("/quiesce", "atespace=team-a&actor=alpha&activationID=act-1&timeout=100ms")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"drained":true`) {
+		t.Fatalf("quiesce = %d %s, want 200 drained", w.Code, w.Body.String())
+	}
+	if !entry.stack.Quiesced() {
+		t.Error("stack is not quiesced after /quiesce")
+	}
+	if w := post("/quiesce", "atespace=team-a&actor=nobody"); w.Code != http.StatusNotFound {
+		t.Errorf("quiesce of an unknown actor = %d, want 404", w.Code)
+	}
+
+	if w := post("/release", "atespace=team-a&actor=alpha&actorUID=uid-other"); w.Code != http.StatusOK {
+		t.Errorf("release of another incarnation = %d, want 200", w.Code)
+	}
+	if a.lookup(ref) != entry {
+		t.Fatal("release of another incarnation dropped the stack")
+	}
+	if w := post("/release", "atespace=team-a&actor=alpha&actorUID=uid-a&reason=delete"); w.Code != http.StatusOK {
+		t.Errorf("release = %d, want 200", w.Code)
+	}
+	if a.lookup(ref) != nil {
+		t.Fatal("release did not drop the stack")
+	}
+	if w := post("/release", "atespace=team-a&actor=alpha"); w.Code != http.StatusOK {
+		t.Errorf("release of an unknown actor = %d, want 200", w.Code)
+	}
+	if w := post("/release", "atespace=Not+Valid&actor=alpha"); w.Code != http.StatusBadRequest {
+		t.Errorf("release with a bad reference = %d, want 400", w.Code)
+	}
+}
+
+type fakeAssignments struct {
+	actor *ateapipb.Actor
+	err   error
+}
+
+func (f *fakeAssignments) GetActor(context.Context, *ateapipb.GetActorRequest, ...grpc.CallOption) (*ateapipb.Actor, error) {
+	return f.actor, f.err
+}
+
+// TestVerifyAttach: an attach is accepted only from the worker the control
+// plane placed this actor incarnation on, for the current activation.
+func TestVerifyAttach(t *testing.T) {
+	hdr := anchortun.AttachHeader{
+		Atespace: "team-a", ActorName: "alpha", ActorUID: "uid-a",
+		WorkerPodUID: "3fa9c1e2-0000-4444-8888-abcdefabcdef", ActivationID: "act-1", Boot: anchortun.BootRestore,
+	}
+	placed := func() *ateapipb.Actor {
+		return &ateapipb.Actor{
+			Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "alpha", Uid: "uid-a"},
+			Status: &ateapipb.ActorStatus{WorkerAssignment: &ateapipb.WorkerAssignment{
+				WorkerPodUid: hdr.WorkerPodUID, ActivationId: "act-1",
+			}},
+		}
+	}
+	for name, tc := range map[string]struct {
+		peer    string
+		actor   func() *ateapipb.Actor
+		err     error
+		noCheck bool
+		want    error
+	}{
+		"placed worker, current activation": {peer: hdr.WorkerPodUID, actor: placed},
+		"no control plane check configured": {peer: hdr.WorkerPodUID, noCheck: true},
+		"peer certificate is another pod":   {peer: "3fa9c1e2-0000-4444-8888-000000000009", actor: placed, want: errIdentityMismatch},
+		"actor not found":                   {peer: hdr.WorkerPodUID, err: errors.New("not found"), want: errAssignmentMismatch},
+		"other incarnation": {peer: hdr.WorkerPodUID, actor: func() *ateapipb.Actor {
+			a := placed()
+			a.Metadata.Uid = "uid-b"
+			return a
+		}, want: errAssignmentMismatch},
+		"placed on another worker": {peer: hdr.WorkerPodUID, actor: func() *ateapipb.Actor {
+			a := placed()
+			a.Status.WorkerAssignment.WorkerPodUid = "3fa9c1e2-0000-4444-8888-000000000009"
+			return a
+		}, want: errAssignmentMismatch},
+		"stale activation": {peer: hdr.WorkerPodUID, actor: func() *ateapipb.Actor {
+			a := placed()
+			a.Status.WorkerAssignment.ActivationId = "act-2"
+			return a
+		}, want: errAssignmentMismatch},
+		"suspended, no assignment": {peer: hdr.WorkerPodUID, actor: func() *ateapipb.Actor {
+			a := placed()
+			a.Status.WorkerAssignment = nil
+			return a
+		}, want: errAssignmentMismatch},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := newTestAnchor()
+			if !tc.noCheck {
+				fake := &fakeAssignments{err: tc.err}
+				if tc.actor != nil {
+					fake.actor = tc.actor()
+				}
+				a.assignments = fake
+			}
+			err := a.verifyAttach(context.Background(), hdr, tc.peer)
+			if tc.want == nil && err != nil {
+				t.Fatalf("verifyAttach = %v, want accepted", err)
+			}
+			if tc.want != nil && !errors.Is(err, tc.want) {
+				t.Fatalf("verifyAttach = %v, want %v", err, tc.want)
+			}
+		})
 	}
 }
 

@@ -41,6 +41,7 @@ func (w *ActorWorkflow) DeleteActor(ctx context.Context, actorRef resources.Acto
 	if actor, err = w.ensureMarkedDeleting(ctx, actorRef, actor); err != nil {
 		return nil, err
 	}
+	w.releaseAnchor(ctx, actor, "delete")
 	if err := w.ensureVolumesDeleted(ctx, actor); err != nil {
 		return nil, err
 	}

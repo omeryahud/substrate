@@ -136,13 +136,14 @@ func (s *Stack) ListenRedirectedTCP(port uint16) (net.Listener, error) {
 		ep.Close()
 		return nil, fmt.Errorf("anchornet: redirect listen: %s", terr)
 	}
-	l := &redirectListener{addr: &net.TCPAddr{IP: net.IP(s.addr.AsSlice()), Port: int(port)}, wq: &wq, ep: ep, closed: make(chan struct{})}
+	l := &redirectListener{stack: s, addr: &net.TCPAddr{IP: net.IP(s.addr.AsSlice()), Port: int(port)}, wq: &wq, ep: ep, closed: make(chan struct{})}
 	l.entry, l.notify = waiter.NewChannelEntry(waiter.ReadableEvents)
 	wq.EventRegister(&l.entry)
 	return l, nil
 }
 
 type redirectListener struct {
+	stack  *Stack
 	addr   *net.TCPAddr
 	wq     *waiter.Queue
 	ep     tcpip.Endpoint
@@ -174,7 +175,7 @@ func (l *redirectListener) Accept() (net.Conn, error) {
 			continue
 		}
 		return &RedirectedConn{
-			Conn:                gonet.NewTCPConn(wq, ep),
+			Conn:                l.stack.GateWrites(gonet.NewTCPConn(wq, ep)),
 			OriginalDestination: &net.TCPAddr{IP: net.IP(original.Addr.AsSlice()), Port: int(original.Port)},
 		}, nil
 	}

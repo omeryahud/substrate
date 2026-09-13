@@ -116,6 +116,10 @@ spec:
     image: ko://github.com/agent-substrate/substrate/demos/counter
     command:
     - /ko-app/counter
+    # The same extra listeners as the plain counter, so the arbitrary-port
+    # CONNECT path is proven through the anchor too.
+    - --extra-port=9090
+    - --tcp-port=9091
     readyz:
       httpGet:
         path: /readyz

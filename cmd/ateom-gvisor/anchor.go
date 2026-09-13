@@ -51,6 +51,13 @@ func (s *AteomService) attachAnchor(ctx context.Context, anchor *ateompb.Connect
 	if err != nil {
 		return nil, fmt.Errorf("invalid anchor attach address %q: %w", anchor.GetAttachAddress(), err)
 	}
+	// ateapi mints the activation id with the assignment so the anchor can
+	// check it. An older ateapi leaves it empty; then the id only tells one
+	// tunnel of this activation from another.
+	activationID := anchor.GetActivationId()
+	if activationID == "" {
+		activationID = rand.Text()
+	}
 	return shuttle.Attach(ctx, shuttle.Config{
 		IfaceName:            ateomnet.HostVethName,
 		AttachAddress:        anchor.GetAttachAddress(),
@@ -62,7 +69,7 @@ func (s *AteomService) attachAnchor(ctx context.Context, anchor *ateompb.Connect
 			ActorName:     actorName,
 			ActorUID:      actorUID,
 			WorkerPodUID:  *podUID,
-			ActivationID:  rand.Text(),
+			ActivationID:  activationID,
 			Boot:          boot,
 			EgressGateway: egress.GetAddress(),
 		},

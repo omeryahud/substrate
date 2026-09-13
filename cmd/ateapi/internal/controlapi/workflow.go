@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/scheduling"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
@@ -79,6 +80,7 @@ type ActorWorkflow struct {
 	instruments          *Instruments
 	egressGatewayAddress string
 	anchor               AnchorConfig
+	anchorControl        *anchorControl
 	pluginRegistry       VolumePluginRegistry
 }
 
@@ -96,7 +98,12 @@ func NewActorWorkflow(
 	anchor AnchorConfig,
 	pluginRegistry VolumePluginRegistry,
 ) *ActorWorkflow {
+	anchorControl, err := newAnchorControl(anchor)
+	if err != nil {
+		slog.Error("Connection anchor control client disabled", slog.Any("err", err))
+	}
 	return &ActorWorkflow{
+		anchorControl:        anchorControl,
 		store:                store,
 		workerCache:          workerCache,
 		scheduler:            scheduling.New(workerCache, scheduling.WithMeter(otel.Meter("ateapi"))),
