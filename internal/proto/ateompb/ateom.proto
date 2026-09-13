@@ -152,6 +152,9 @@ message ConnectionAnchor {
   // activation_id is the id ateapi minted for this placement, which the
   // frame shuttle presents to the anchor.
   string activation_id = 3;
+  // wake_on_data asks the anchor to resume the actor when data arrives for
+  // it while it is suspended.
+  bool wake_on_data = 4;
 }
 
 // WorkloadSpec parallels Pod, but with far fewer configurable fields.

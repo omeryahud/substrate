@@ -72,6 +72,7 @@ func (s *AteomService) attachAnchor(ctx context.Context, anchor *ateompb.Connect
 			ActivationID:  activationID,
 			Boot:          boot,
 			EgressGateway: egress.GetAddress(),
+			WakeOnData:    anchor.GetWakeOnData(),
 		},
 	})
 }

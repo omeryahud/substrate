@@ -66,11 +66,16 @@ spec:
         - --credential-broker-socket=/var/lib/ateom-gvisor/credential-broker.sock
         - --egress-gateway-trust-bundle=/run/servicedns.podcert.ate.dev/trust-bundle.pem
         - --connect-listen=:444
+        - --status-listen=:8080
         # Every attach is checked against the actor's assignment in ateapi.
         - --ateapi-address=api.ate-system.svc:443
         - --ateapi-server-name=api.ate-system.svc
         - --ateapi-ca-file=/run/servicedns.podcert.ate.dev/trust-bundle.pem
         - --ateapi-client-cert=/run/podidentity.podcert.ate.dev/credential-bundle.pem
+        # OTLP exporter settings shared by every control plane component.
+        envFrom:
+        - configMapRef:
+            name: ate-otel-config
         ports:
         - name: https
           containerPort: 443
@@ -82,6 +87,8 @@ spec:
           containerPort: 446
         - name: metrics
           containerPort: 9090
+        - name: status
+          containerPort: 8080
         readinessProbe:
           httpGet:
             path: /readyz

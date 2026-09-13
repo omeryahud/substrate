@@ -85,6 +85,18 @@ func (s *Stack) Addr() tcpip.Address { return s.addr }
 // Link returns the channel link endpoint whose frames the tunnel carries.
 func (s *Stack) Link() *channel.Endpoint { return s.link }
 
+// SetTCPMaxRetries bounds how many times a segment toward the actor is
+// retransmitted before the connection is aborted. gVisor's default gives up
+// after about fifteen minutes; a held connection must outlive the hold TTL,
+// so the anchor raises it. It applies to endpoints created afterwards.
+func (s *Stack) SetTCPMaxRetries(retries uint64) error {
+	opt := tcpip.TCPMaxRetriesOption(retries)
+	if err := s.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &opt); err != nil {
+		return fmt.Errorf("anchornet: setting TCP max retries: %s", err)
+	}
+	return nil
+}
+
 // Neighbors lists the stack's ARP cache.
 func (s *Stack) Neighbors() []stack.NeighborEntry {
 	entries, err := s.stack.Neighbors(nicID, ipv4.ProtocolNumber)

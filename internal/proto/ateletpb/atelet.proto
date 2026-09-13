@@ -116,6 +116,10 @@ message ConnectionAnchor {
   // activation_id is the id ateapi minted for this placement, which the
   // worker's tunnel presents to the anchor.
   string activation_id = 3;
+  // wake_on_data asks the anchor to resume the actor when data arrives for
+  // it while it is suspended, per the template's ate.dev/wake-on-data
+  // annotation.
+  bool wake_on_data = 4;
 }
 
 // AssetFile is one content-addressed file atelet fetches for a sandbox runtime

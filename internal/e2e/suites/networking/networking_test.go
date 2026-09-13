@@ -163,6 +163,45 @@ func TestActorWebSocketSurvivesSuspend(t *testing.T) {
 	t.Logf("WebSocket survived suspend and resume: echo succeeded on the same connection")
 }
 
+// TestActorWakesOnData: the counter-preserve template asks to be woken by
+// data. A message sent on a held WebSocket while the Actor is suspended
+// resumes it, and the echo arrives, without anyone calling ResumeActor.
+func TestActorWakesOnData(t *testing.T) {
+	ctx := context.Background()
+	actorName, _ := createAndResumeActor(t, ctx, "wake", counterPreserveFixture())
+	router := mustRouterClient(t, ctx)
+	defer router.Close()
+	actorRef := resources.ActorRef{Atespace: networkingAtespace, Name: actorName}
+	clients := e2e.GetClients()
+
+	conn := dialWebSocketWithRetry(t, ctx, router, actorRef)
+	defer conn.Close()
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("before")); err != nil {
+		t.Fatal(err)
+	}
+	if _, msg, err := conn.ReadMessage(); err != nil || string(msg) != "echo: before" {
+		t.Fatalf("echo before suspend = %q, %v", msg, err)
+	}
+
+	suspendNetworkingActor(ctx, t, clients, actorName)
+	waitForNetworkingActorState(ctx, t, clients, actorName, ateapipb.ActorState_ACTOR_STATE_SUSPENDED)
+	t.Log("actor suspended with the WebSocket still open")
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("wake up")); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("no echo after sending to the suspended actor: %v", err)
+	}
+	if string(msg) != "echo: wake up" {
+		t.Fatalf("echo = %q, want \"echo: wake up\"", msg)
+	}
+	waitForNetworkingActorState(ctx, t, clients, actorName, ateapipb.ActorState_ACTOR_STATE_RUNNING)
+	t.Log("data on the held connection woke the actor and was echoed on the same connection")
+}
+
 // echoTargetAddress is the plain TCP echo service the counter demo deploys
 // outside any sandbox, reached from an Actor through the egress gateway.
 const echoTargetAddress = "echo-target.ate-demo-counter.svc.cluster.local:7777"

@@ -28,3 +28,14 @@ const (
 func PreservesConnections(annotations map[string]string) bool {
 	return annotations[ConnectionPolicyAnnotation] == ConnectionPolicyPreserve
 }
+
+// WakeOnDataAnnotation on a connection-preserving ActorTemplate asks the
+// anchor to resume a suspended Actor when data arrives for one of its held
+// connections. The value is "true".
+const WakeOnDataAnnotation = "ate.dev/wake-on-data"
+
+// WakesOnData reports whether an anchored Actor of this template is resumed
+// by data arriving while it is suspended.
+func WakesOnData(annotations map[string]string) bool {
+	return PreservesConnections(annotations) && annotations[WakeOnDataAnnotation] == "true"
+}

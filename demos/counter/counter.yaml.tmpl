@@ -110,6 +110,9 @@ metadata:
   namespace: ate-demo-counter
   annotations:
     ate.dev/connection-policy: Preserve
+    # Data arriving on a held connection while the Actor is suspended
+    # resumes it.
+    ate.dev/wake-on-data: "true"
 spec:
   containers:
   - name: counter

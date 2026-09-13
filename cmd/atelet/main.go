@@ -1682,6 +1682,7 @@ func toAteomConnectionAnchor(anchor *ateletpb.ConnectionAnchor) *ateompb.Connect
 		AttachAddress:  anchor.GetAttachAddress(),
 		ControlAddress: anchor.GetControlAddress(),
 		ActivationId:   anchor.GetActivationId(),
+		WakeOnData:     anchor.GetWakeOnData(),
 	}
 }
 

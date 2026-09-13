@@ -154,15 +154,44 @@ func (c *gatedConn) Write(p []byte) (int, error) {
 	return c.Conn.Write(p)
 }
 
+// Close ends the connection for its writers at once. While the stack is
+// quiesced the close toward the actor is deferred until a worker attaches
+// again, so a far end that hangs up during a suspend is seen by the actor as
+// an orderly close after resume instead of a FIN retransmitted at a frozen
+// sandbox.
 func (c *gatedConn) Close() error {
 	c.once.Do(func() { close(c.closed) })
-	return c.Conn.Close()
+	if !c.gate.isQuiesced() {
+		return c.Conn.Close()
+	}
+	go func() {
+		c.gate.waitOpen()
+		_ = c.Conn.Close()
+	}()
+	return nil
 }
 
-// CloseWrite keeps the half-close the proxies rely on.
+// CloseWrite keeps the half-close the proxies rely on, deferred the same way
+// as Close while quiesced.
 func (c *gatedConn) CloseWrite() error {
-	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+	cw, ok := c.Conn.(interface{ CloseWrite() error })
+	if !ok {
+		return nil
+	}
+	if !c.gate.isQuiesced() {
 		return cw.CloseWrite()
 	}
+	go func() {
+		c.gate.waitOpen()
+		_ = cw.CloseWrite()
+	}()
 	return nil
+}
+
+// waitOpen blocks until the gate is open.
+func (g *writeGate) waitOpen() {
+	g.mu.Lock()
+	open := g.open
+	g.mu.Unlock()
+	<-open
 }

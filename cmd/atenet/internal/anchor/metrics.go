@@ -45,6 +45,8 @@ const (
 	quiesceDurationName       = "atenet.anchor.quiesce.duration"
 	releasesMetricName        = "atenet.anchor.releases"
 	connectTunnelsName        = "atenet.anchor.connect.tunnels"
+	wakesMetricName           = "atenet.anchor.wakes"
+	capRejectionsName         = "atenet.anchor.cap.rejections"
 )
 
 // Outcomes for the egress activation instrument.
@@ -96,6 +98,8 @@ type Metrics struct {
 	quiesceDuration   metric.Float64Histogram
 	releases          metric.Int64Counter
 	connectTunnels    metric.Int64Counter
+	wakes             metric.Int64Counter
+	capRejections     metric.Int64Counter
 }
 
 // NewMetrics creates the anchor's instruments from the global MeterProvider.
@@ -187,7 +191,31 @@ func NewMetrics() (*Metrics, error) {
 		metric.WithDescription("raw CONNECT tunnels the router opened into actors")); err != nil {
 		return nil, fmt.Errorf("create %s: %w", connectTunnelsName, err)
 	}
+	if m.wakes, err = meter.Int64Counter(wakesMetricName,
+		metric.WithUnit("{wake}"),
+		metric.WithDescription("resume attempts for held actors that data arrived for, by outcome")); err != nil {
+		return nil, fmt.Errorf("create %s: %w", wakesMetricName, err)
+	}
+	if m.capRejections, err = meter.Int64Counter(capRejectionsName,
+		metric.WithUnit("{rejection}"),
+		metric.WithDescription("attaches or connections refused because an anchor cap was reached, by kind")); err != nil {
+		return nil, fmt.Errorf("create %s: %w", capRejectionsName, err)
+	}
 	return m, nil
+}
+
+func (m *Metrics) recordWake(ctx context.Context, outcome string) {
+	if m == nil {
+		return
+	}
+	m.wakes.Add(ctx, 1, metric.WithAttributes(ateattr.AnchorOutcomeKey.String(outcome)))
+}
+
+func (m *Metrics) recordCapRejection(ctx context.Context, kind string) {
+	if m == nil {
+		return
+	}
+	m.capRejections.Add(ctx, 1, metric.WithAttributes(ateattr.AnchorOutcomeKey.String(kind)))
 }
 
 func (m *Metrics) recordConnect(ctx context.Context) {

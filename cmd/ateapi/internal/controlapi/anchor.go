@@ -63,6 +63,7 @@ func (w *ActorWorkflow) connectionAnchor(tmpl *atev1alpha1.ActorTemplate, activa
 		AttachAddress:  w.anchor.AttachAddress,
 		ControlAddress: w.anchor.ControlAddress,
 		ActivationId:   activationID,
+		WakeOnData:     resources.WakesOnData(tmpl.Annotations),
 	}
 }
 

@@ -471,7 +471,10 @@ type ConnectionAnchor struct {
 	ControlAddress string `protobuf:"bytes,2,opt,name=control_address,json=controlAddress,proto3" json:"control_address,omitempty"`
 	// activation_id is the id ateapi minted for this placement, which the
 	// frame shuttle presents to the anchor.
-	ActivationId  string `protobuf:"bytes,3,opt,name=activation_id,json=activationId,proto3" json:"activation_id,omitempty"`
+	ActivationId string `protobuf:"bytes,3,opt,name=activation_id,json=activationId,proto3" json:"activation_id,omitempty"`
+	// wake_on_data asks the anchor to resume the actor when data arrives for
+	// it while it is suspended.
+	WakeOnData    bool `protobuf:"varint,4,opt,name=wake_on_data,json=wakeOnData,proto3" json:"wake_on_data,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -525,6 +528,13 @@ func (x *ConnectionAnchor) GetActivationId() string {
 		return x.ActivationId
 	}
 	return ""
+}
+
+func (x *ConnectionAnchor) GetWakeOnData() bool {
+	if x != nil {
+		return x.WakeOnData
+	}
+	return false
 }
 
 // WorkloadSpec parallels Pod, but with far fewer configurable fields.
@@ -1759,11 +1769,13 @@ const file_ateom_proto_rawDesc = "" +
 	"\x0f_egress_gatewayB\t\n" +
 	"\a_anchor\")\n" +
 	"\rEgressGateway\x12\x18\n" +
-	"\aaddress\x18\x01 \x01(\tR\aaddress\"\x87\x01\n" +
+	"\aaddress\x18\x01 \x01(\tR\aaddress\"\xa9\x01\n" +
 	"\x10ConnectionAnchor\x12%\n" +
 	"\x0eattach_address\x18\x01 \x01(\tR\rattachAddress\x12'\n" +
 	"\x0fcontrol_address\x18\x02 \x01(\tR\x0econtrolAddress\x12#\n" +
-	"\ractivation_id\x18\x03 \x01(\tR\factivationId\"@\n" +
+	"\ractivation_id\x18\x03 \x01(\tR\factivationId\x12 \n" +
+	"\fwake_on_data\x18\x04 \x01(\bR\n" +
+	"wakeOnData\"@\n" +
 	"\fWorkloadSpec\x120\n" +
 	"\n" +
 	"containers\x18\x01 \x03(\v2\x10.ateom.ContainerR\n" +

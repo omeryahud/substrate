@@ -885,6 +885,17 @@ when an anchor is configured, which it knows from the activation.
 | `--hold-ttl` (anchor) | `24h` | Reset connections held longer than this and drop the Actor's stack. Until `Release` exists this is the only way a deleted Actor's stack is reclaimed, so the default is finite. `0` holds forever. |
 | `--metrics-listen-addr` (anchor) | `:9090` | Prometheus metrics, `/readyz`, `/healthz`. |
 | `--log-frames` (anchor) | `false` | Log one line per Ethernet frame at debug level. |
+| `--connect-listen` (anchor) | `:444` | Raw CONNECT relay into actors, as a worker's atunnel serves it. |
+| `--status-listen` (anchor) | `:8080` | Plain HTTP `/statusz`: actors, held or attached, connections, egress. |
+| `--max-actors` (anchor) | `4096` | Most actor stacks held; further attaches are refused. |
+| `--max-connections` (anchor) | `65536` | Most TCP connections across all stacks; further ones are refused. |
+| `--wake-interval` (anchor) | `1s` | Least time between two data-triggered resume attempts for one Actor. |
+| `--credential-broker-socket` (anchor) | node-local atelet socket | Mints Actor certificates for egress; empty disables Actor egress. |
+| `--egress-gateway-trust-bundle` (anchor) | servicedns trust bundle | Verifies the egress gateway. |
+| `--dns-upstream` (anchor) | from `/etc/resolv.conf` | Resolver Actor DNS queries are forwarded to. |
+| `--ateapi-address`, `--ateapi-ca-file`, `--ateapi-client-cert`, `--ateapi-server-name` (anchor) | unset | Check every attach against the Actor's assignment and wake held Actors. Unset skips both. |
+| `--anchor-client-cred-bundle`, `--anchor-trust-bundle` (ateapi) | unset | Let ateapi quiesce the anchor before a checkpoint and release on delete. |
+| `ate.dev/wake-on-data: "true"` (ActorTemplate annotation) | unset | Data arriving on a held connection resumes the suspended Actor. |
 | `--quiesce-timeout` (ateapi) | `250ms` | Bound on the Quiesce step. |
 | `--wake-rate-limit` (anchor) | `1/s` per Actor | Cap on wake attempts per Actor. |
 | `--route-timeout` (router) | `10s` | Existing. Raise for templates whose in-flight requests may span a suspend. |

@@ -149,12 +149,18 @@ func TestServeDNS_ForwardsAndAnswersFromTheQueriedAddress(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	if _, err := conn.Write([]byte("query")); err != nil {
-		t.Fatal(err)
-	}
+	// The forwarder binds in the background; a real resolver retries too.
 	buf := make([]byte, 64)
-	n, err := conn.Read(buf)
+	var n int
+	for attempt := 0; attempt < 5; attempt++ {
+		if _, err = conn.Write([]byte("query")); err != nil {
+			t.Fatal(err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		if n, err = conn.Read(buf); err == nil {
+			break
+		}
+	}
 	if err != nil {
 		t.Fatalf("no reply from the far resolver address: %v", err)
 	}

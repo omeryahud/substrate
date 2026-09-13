@@ -89,10 +89,15 @@ type Config struct {
 	LogFrames bool
 	// Egress configures actors' outbound connections and DNS.
 	Egress EgressConfig
-	// Ateapi lets the anchor check attaches against the control plane.
+	// Ateapi lets the anchor check attaches against the control plane and
+	// wake held actors.
 	Ateapi AteapiConfig
 	// ConnectListen serves the router's raw CONNECT tunnels into actors.
 	ConnectListen string
+	// StatusListen serves /statusz over plain HTTP. Empty disables it.
+	StatusListen string
+	// Hold bounds held state and wake attempts.
+	Hold HoldConfig
 }
 
 // Anchor holds one network stack per actor and the listeners that reach them.
@@ -102,8 +107,9 @@ type Anchor struct {
 	metrics     *Metrics
 	now         func() time.Time
 	dnsUpstream string
-	// assignments is nil when attaches are not checked against ateapi.
-	assignments assignmentReader
+	// controlPlane is nil when the anchor runs without ateapi: attaches are
+	// then not checked and held actors are not woken.
+	controlPlane controlPlane
 
 	mu     sync.Mutex
 	actors map[resources.ActorRef]*actorEntry
@@ -130,6 +136,9 @@ type actorEntry struct {
 	activationID string
 	// heldSince is when the last tunnel went away; zero while attached.
 	heldSince time.Time
+	// wakeOnData is the template's choice, carried in the attach header.
+	wakeOnData bool
+	lastWake   time.Time
 }
 
 // ingressCall is the per-request state the proxy callbacks need.
@@ -171,13 +180,13 @@ func New(cfg Config) (*Anchor, error) {
 			return nil, err
 		}
 	}
-	var assignments assignmentReader
+	var control controlPlane
 	if cfg.Ateapi.enabled() {
-		if assignments, err = newAssignmentReader(cfg.Ateapi); err != nil {
+		if control, err = newControlPlane(cfg.Ateapi); err != nil {
 			return nil, err
 		}
 	}
-	return &Anchor{cfg: cfg, clientCAs: pool, metrics: metrics, now: time.Now, dnsUpstream: dnsUpstream, assignments: assignments, actors: map[resources.ActorRef]*actorEntry{}}, nil
+	return &Anchor{cfg: cfg, clientCAs: pool, metrics: metrics, now: time.Now, dnsUpstream: dnsUpstream, controlPlane: control, actors: map[resources.ActorRef]*actorEntry{}}, nil
 }
 
 func loadCredentialBundle(path string) (*tls.Certificate, error) {
@@ -269,7 +278,7 @@ func (a *Anchor) Run(ctx context.Context) error {
 	controlSrv := &http.Server{Handler: controlMux, TLSConfig: a.tlsConfig(a.cfg.CredentialBundlePath, verifyWorkload), ReadHeaderTimeout: headerTimeout}
 	attachTLS := tls.NewListener(attachLis, a.tlsConfig(a.cfg.CredentialBundlePath, verifyWorkload))
 
-	errc := make(chan error, 4)
+	errc := make(chan error, 5)
 	go func() { errc <- ingressSrv.ServeTLS(ingressLis, "", "") }()
 	go func() { errc <- controlSrv.ServeTLS(controlLis, "", "") }()
 	go func() { errc <- a.serveAttach(ctx, attachTLS) }()
@@ -277,6 +286,7 @@ func (a *Anchor) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	statusSrv := a.startStatusListener(errc)
 	go a.sweepLoop(ctx)
 	slog.InfoContext(ctx, "anchor serving",
 		slog.String("ingress", a.cfg.IngressListen),
@@ -298,7 +308,22 @@ func (a *Anchor) Run(ctx context.Context) error {
 	if connectSrv != nil {
 		_ = connectSrv.Close()
 	}
+	if statusSrv != nil {
+		_ = statusSrv.Close()
+	}
 	return err
+}
+
+// startStatusListener serves /statusz over plain HTTP when configured.
+func (a *Anchor) startStatusListener(errc chan<- error) *http.Server {
+	if a.cfg.StatusListen == "" {
+		return nil
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/statusz", a.serveStatusz)
+	srv := &http.Server{Addr: a.cfg.StatusListen, Handler: mux, ReadHeaderTimeout: headerTimeout}
+	go func() { errc <- srv.ListenAndServe() }()
+	return srv
 }
 
 // startConnectListener serves the router's raw CONNECT tunnels, over HTTP/1.1
@@ -378,6 +403,7 @@ func (a *Anchor) handleAttach(ctx context.Context, conn net.Conn) {
 	entry.detach = cancel
 	entry.activationID = hdr.ActivationID
 	entry.heldSince = time.Time{}
+	entry.wakeOnData = hdr.WakeOnData
 	entry.mu.Unlock()
 	entry.stack.Unquiesce()
 	a.metrics.addTunnels(ctx, 1)
@@ -408,11 +434,15 @@ func (a *Anchor) handleAttach(ctx context.Context, conn net.Conn) {
 
 	entry.mu.Lock()
 	// Only clear the tunnel we own; a newer attach may have replaced it.
-	if entry.activationID == hdr.ActivationID {
+	held := entry.activationID == hdr.ActivationID
+	if held {
 		entry.detach = nil
 		entry.heldSince = a.clock()
 	}
 	entry.mu.Unlock()
+	if held {
+		a.markHeld(entry)
+	}
 	cancel()
 	a.metrics.addTunnels(ctx, -1)
 	slog.InfoContext(ctx, "anchor: actor detached, connections held",
@@ -457,6 +487,10 @@ func (a *Anchor) getOrCreate(ctx context.Context, ref resources.ActorRef, actorU
 		}
 		a.dropLocked(ctx, e)
 	}
+	if a.cfg.Hold.MaxActors > 0 && len(a.actors) >= a.cfg.Hold.MaxActors {
+		a.metrics.recordCapRejection(ctx, "actors")
+		return nil, errTooManyActors
+	}
 	e, err := a.newEntry(ref, actorUID)
 	if err != nil {
 		return nil, err
@@ -476,6 +510,8 @@ func (a *Anchor) dropLocked(ctx context.Context, e *actorEntry) {
 	e.mu.Unlock()
 	e.transport.CloseIdleConnections()
 	e.egress.stop(ctx)
+	// Release writers held by the gate before the stack goes away.
+	e.stack.Unquiesce()
 	e.stack.Close()
 	delete(a.actors, e.ref)
 	a.metrics.addActors(ctx, -1)
@@ -486,9 +522,17 @@ func (a *Anchor) newEntry(ref resources.ActorRef, actorUID string) (*actorEntry,
 	if err != nil {
 		return nil, err
 	}
+	if err := st.SetTCPMaxRetries(tcpRetriesFor(a.cfg.HoldTTL)); err != nil {
+		st.Close()
+		return nil, err
+	}
 	e := &actorEntry{ref: ref, actorUID: actorUID, stack: st}
+	st.OnWriteBlocked(func() { a.wake(e) })
 	e.transport = &http.Transport{
 		DialContext: func(ctx context.Context, _ string, addr string) (net.Conn, error) {
+			if !a.connectionAllowed(ctx) {
+				return nil, errTooManyConnections
+			}
 			return dialInStack(ctx, st, addr)
 		},
 		MaxIdleConnsPerHost: 8,

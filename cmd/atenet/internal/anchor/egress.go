@@ -81,7 +81,11 @@ func (a *Anchor) startEgress(entry *actorEntry) error {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	entry.egress = &actorEgress{proxy: proxy, cancel: cancel}
-	counted := &countingListener{Listener: listener, onAccept: func() { a.metrics.recordEgressConnection(ctx) }}
+	counted := &countingListener{
+		Listener: listener,
+		onAccept: func() { a.metrics.recordEgressConnection(ctx) },
+		allowed:  func() bool { return a.connectionAllowed(ctx) },
+	}
 	go func() {
 		if err := proxy.Serve(ctx, counted); err != nil {
 			slog.WarnContext(ctx, "anchor: egress proxy stopped", slog.Any("actor", entry.ref), slog.Any("err", err))
@@ -163,18 +167,27 @@ func (e *actorEgress) stop(ctx context.Context) {
 	e.cancel()
 }
 
-// countingListener counts accepted connections for the metrics.
+// countingListener counts accepted connections for the metrics and refuses
+// them past the anchor-wide connection cap.
 type countingListener struct {
 	net.Listener
 	onAccept func()
+	allowed  func() bool
 }
 
 func (l *countingListener) Accept() (net.Conn, error) {
-	conn, err := l.Listener.Accept()
-	if err == nil {
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if !l.allowed() {
+			conn.Close()
+			continue
+		}
 		l.onAccept()
+		return conn, nil
 	}
-	return conn, err
 }
 
 // defaultDNSUpstream is the first nameserver in resolvConf, on port 53.

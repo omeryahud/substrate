@@ -63,6 +63,9 @@ type AttachHeader struct {
 	// the actor's outbound connections through. Empty leaves the actor
 	// without egress, as the control plane decided.
 	EgressGateway string `json:"egressGateway,omitempty"`
+	// WakeOnData asks the anchor to resume the actor when data arrives for
+	// it while it is suspended.
+	WakeOnData bool `json:"wakeOnData,omitempty"`
 }
 
 // Valid reports whether the header names a well-formed actor, a worker, an

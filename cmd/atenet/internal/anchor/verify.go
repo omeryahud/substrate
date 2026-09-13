@@ -47,12 +47,15 @@ func (c AteapiConfig) enabled() bool {
 	return c.Address != "" && c.CAFile != "" && c.ClientCertPath != ""
 }
 
-// assignmentReader is the part of the control API the anchor needs.
-type assignmentReader interface {
+// controlPlane is the part of the control API the anchor needs: reading an
+// actor's assignment on attach, and resuming a held actor that data arrived
+// for.
+type controlPlane interface {
 	GetActor(ctx context.Context, in *ateapipb.GetActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error)
+	ResumeActor(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error)
 }
 
-func newAssignmentReader(cfg AteapiConfig) (assignmentReader, error) {
+func newControlPlane(cfg AteapiConfig) (controlPlane, error) {
 	dialOpts, err := ateapiauth.DialOptions(ateapiauth.ClientConfig{
 		CAFile:           cfg.CAFile,
 		ServerName:       cfg.ServerName,
@@ -82,12 +85,12 @@ func (a *Anchor) verifyAttach(ctx context.Context, hdr anchortun.AttachHeader, p
 	if peerPodUID != "" && peerPodUID != hdr.WorkerPodUID {
 		return fmt.Errorf("%w: certificate pod %s, header pod %s", errIdentityMismatch, peerPodUID, hdr.WorkerPodUID)
 	}
-	if a.assignments == nil {
+	if a.controlPlane == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, verifyTimeout)
 	defer cancel()
-	actor, err := a.assignments.GetActor(ctx, &ateapipb.GetActorRequest{
+	actor, err := a.controlPlane.GetActor(ctx, &ateapipb.GetActorRequest{
 		Actor: &ateapipb.ObjectRef{Atespace: hdr.Atespace, Name: hdr.ActorName},
 	})
 	if err != nil {

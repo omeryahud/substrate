@@ -18,11 +18,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -518,6 +520,10 @@ func (f *fakeAssignments) GetActor(context.Context, *ateapipb.GetActorRequest, .
 	return f.actor, f.err
 }
 
+func (f *fakeAssignments) ResumeActor(context.Context, *ateapipb.ResumeActorRequest, ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+	return &ateapipb.ResumeActorResponse{}, nil
+}
+
 // TestVerifyAttach: an attach is accepted only from the worker the control
 // plane placed this actor incarnation on, for the current activation.
 func TestVerifyAttach(t *testing.T) {
@@ -572,7 +578,7 @@ func TestVerifyAttach(t *testing.T) {
 				if tc.actor != nil {
 					fake.actor = tc.actor()
 				}
-				a.assignments = fake
+				a.controlPlane = fake
 			}
 			err := a.verifyAttach(context.Background(), hdr, tc.peer)
 			if tc.want == nil && err != nil {
@@ -582,6 +588,155 @@ func TestVerifyAttach(t *testing.T) {
 				t.Fatalf("verifyAttach = %v, want %v", err, tc.want)
 			}
 		})
+	}
+}
+
+type countingControlPlane struct {
+	fakeAssignments
+	resumes atomic.Int32
+}
+
+func (c *countingControlPlane) ResumeActor(context.Context, *ateapipb.ResumeActorRequest, ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+	c.resumes.Add(1)
+	return &ateapipb.ResumeActorResponse{}, nil
+}
+
+// TestWake: a held actor whose template asked for it is resumed when data
+// arrives, at most once per wake interval; an attached actor or one that did
+// not ask is left alone.
+func TestWake(t *testing.T) {
+	now := time.Date(2026, 9, 13, 8, 0, 0, 0, time.UTC)
+	a := newTestAnchor()
+	a.now = func() time.Time { return now }
+	a.cfg.Hold.WakeInterval = time.Second
+	control := &countingControlPlane{}
+	a.controlPlane = control
+	entry, err := a.getOrCreate(context.Background(), resources.ActorRef{Atespace: "team-a", Name: "alpha"}, "uid-a", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer entry.stack.Close()
+	waitResumes := func(want int32) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for control.resumes.Load() != want && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if got := control.resumes.Load(); got != want {
+			t.Fatalf("resume attempts = %d, want %d", got, want)
+		}
+	}
+
+	a.wake(entry)
+	waitResumes(0)
+
+	entry.wakeOnData = true
+	entry.detach = func() {}
+	a.wake(entry)
+	waitResumes(0)
+
+	entry.detach = nil
+	a.wake(entry)
+	waitResumes(1)
+	a.wake(entry)
+	waitResumes(1)
+
+	now = now.Add(2 * time.Second)
+	a.wake(entry)
+	waitResumes(2)
+
+	a.controlPlane = nil
+	now = now.Add(2 * time.Second)
+	a.wake(entry)
+	waitResumes(2)
+}
+
+// TestHeldWriteWakesTheActor: after a detach, the first write toward the
+// actor is held and triggers a wake.
+func TestHeldWriteWakesTheActor(t *testing.T) {
+	a := newTestAnchor()
+	a.cfg.Hold.WakeInterval = time.Second
+	control := &countingControlPlane{}
+	a.controlPlane = control
+	entry, err := a.getOrCreate(context.Background(), resources.ActorRef{Atespace: "team-a", Name: "alpha"}, "uid-a", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer entry.stack.Close()
+	entry.wakeOnData = true
+	a.markHeld(entry)
+
+	pipeA, pipeB := net.Pipe()
+	defer pipeB.Close()
+	conn := entry.stack.GateWrites(pipeA)
+	defer conn.Close()
+	done := make(chan struct{})
+	go func() {
+		_, _ = conn.Write([]byte("data for a suspended actor"))
+		close(done)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for control.resumes.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if control.resumes.Load() != 1 {
+		t.Fatalf("resume attempts = %d, want 1", control.resumes.Load())
+	}
+	select {
+	case <-done:
+		t.Fatal("write went through while the actor is held")
+	default:
+	}
+	go func() { _, _ = io.Copy(io.Discard, pipeB) }()
+	entry.stack.Unquiesce()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("write stayed held after the actor reattached")
+	}
+}
+
+// TestCaps: stacks beyond the actor cap are refused and counted.
+func TestCaps(t *testing.T) {
+	ctx := context.Background()
+	a := newTestAnchor()
+	a.cfg.Hold.MaxActors = 1
+	first, err := a.getOrCreate(ctx, resources.ActorRef{Atespace: "team-a", Name: "alpha"}, "uid-a", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.stack.Close()
+	if _, err := a.getOrCreate(ctx, resources.ActorRef{Atespace: "team-a", Name: "beta"}, "uid-b", false); !errors.Is(err, errTooManyActors) {
+		t.Fatalf("second actor over the cap: err = %v, want %v", err, errTooManyActors)
+	}
+	if again, err := a.getOrCreate(ctx, resources.ActorRef{Atespace: "team-a", Name: "alpha"}, "uid-a", false); err != nil || again != first {
+		t.Fatalf("reattach of a held actor under the cap failed: %v", err)
+	}
+	a.cfg.Hold.MaxConnections = 0
+	if !a.connectionAllowed(ctx) {
+		t.Error("no connection cap refused a connection")
+	}
+}
+
+func TestServeStatusz(t *testing.T) {
+	a := newTestAnchor()
+	a.cfg.HoldTTL = time.Hour
+	entry, err := a.getOrCreate(context.Background(), resources.ActorRef{Atespace: "team-a", Name: "alpha"}, "uid-a", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer entry.stack.Close()
+	entry.heldSince = time.Now()
+	w := httptest.NewRecorder()
+	a.serveStatusz(w, httptest.NewRequest(http.MethodGet, "/statusz", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("statusz = %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{`"name": "alpha"`, `"held": 1`, `"attached": 0`, `"holdTTL": "1h0m0s"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("statusz body lacks %s:\n%s", want, body)
+		}
 	}
 }
 
