@@ -35,6 +35,44 @@ type HoldConfig struct {
 	// WakeInterval is the least time between two resume attempts for one
 	// actor woken by data.
 	WakeInterval time.Duration
+	// UnquiesceAfter is how long after an attach held writes are let go when
+	// no readiness probe reported the actor back sooner. A segment that
+	// reaches a sandbox still being restored can be reset, so writes wait for
+	// a sign of life.
+	UnquiesceAfter time.Duration
+}
+
+// armResumeWrites schedules the release of held writes after an attach. A
+// successful readiness probe releases them sooner through resumeWrites.
+func (a *Anchor) armResumeWrites(entry *actorEntry, activationID string) {
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.resumeTimer != nil {
+		entry.resumeTimer.Stop()
+	}
+	delay := a.cfg.Hold.UnquiesceAfter
+	if delay <= 0 {
+		delay = 3 * time.Second
+	}
+	entry.resumeTimer = time.AfterFunc(delay, func() {
+		entry.mu.Lock()
+		current := entry.activationID == activationID && entry.detach != nil
+		entry.mu.Unlock()
+		if current {
+			entry.stack.Unquiesce()
+		}
+	})
+}
+
+// resumeWrites lets held writes go now: the actor answered a probe.
+func (a *Anchor) resumeWrites(entry *actorEntry) {
+	entry.mu.Lock()
+	if entry.resumeTimer != nil {
+		entry.resumeTimer.Stop()
+		entry.resumeTimer = nil
+	}
+	entry.mu.Unlock()
+	entry.stack.Unquiesce()
 }
 
 // tcpRetriesFor is how many retransmits a held connection may take before

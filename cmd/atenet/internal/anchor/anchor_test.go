@@ -46,7 +46,9 @@ import (
 )
 
 func newTestAnchor() *Anchor {
-	return &Anchor{actors: map[resources.ActorRef]*actorEntry{}}
+	a := &Anchor{actors: map[resources.ActorRef]*actorEntry{}}
+	a.cfg.Hold.UnquiesceAfter = 20 * time.Millisecond
+	return a
 }
 
 func TestActorRefFromRequest(t *testing.T) {

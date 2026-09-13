@@ -139,6 +139,9 @@ type actorEntry struct {
 	// wakeOnData is the template's choice, carried in the attach header.
 	wakeOnData bool
 	lastWake   time.Time
+	// resumeTimer lets held writes go a little after an attach when no
+	// readiness probe told the anchor the actor is back sooner.
+	resumeTimer *time.Timer
 }
 
 // ingressCall is the per-request state the proxy callbacks need.
@@ -405,7 +408,7 @@ func (a *Anchor) handleAttach(ctx context.Context, conn net.Conn) {
 	entry.heldSince = time.Time{}
 	entry.wakeOnData = hdr.WakeOnData
 	entry.mu.Unlock()
-	entry.stack.Unquiesce()
+	a.armResumeWrites(entry, hdr.ActivationID)
 	a.metrics.addTunnels(ctx, 1)
 
 	slog.InfoContext(ctx, "anchor: actor attached",
@@ -533,7 +536,7 @@ func (a *Anchor) newEntry(ref resources.ActorRef, actorUID string) (*actorEntry,
 			if !a.connectionAllowed(ctx) {
 				return nil, errTooManyConnections
 			}
-			return dialInStack(ctx, st, addr)
+			return dialInStack(ctx, st, addr, true)
 		},
 		MaxIdleConnsPerHost: 8,
 		IdleConnTimeout:     90 * time.Second,
@@ -692,7 +695,10 @@ func (a *Anchor) reject(w http.ResponseWriter, r *http.Request, start time.Time)
 	a.metrics.recordIngress(r.Context(), a.clock().Sub(start), outcomeMisdirected)
 }
 
-func dialInStack(ctx context.Context, st *anchornet.Stack, addr string) (net.Conn, error) {
+// dialInStack opens a TCP connection to the actor inside its stack. Gated
+// connections hold their writes while the actor is away; a readiness probe
+// is not gated, because it is what tells the anchor the actor is back.
+func dialInStack(ctx context.Context, st *anchornet.Stack, addr string, gated bool) (net.Conn, error) {
 	_, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
@@ -706,6 +712,9 @@ func dialInStack(ctx context.Context, st *anchornet.Stack, addr string) (net.Con
 	conn, err := gonet.DialContextTCP(ctx, st.Stack(), full, ipv4.ProtocolNumber)
 	if err != nil {
 		return nil, err
+	}
+	if !gated {
+		return conn, nil
 	}
 	return st.GateWrites(conn), nil
 }
@@ -738,7 +747,7 @@ func (a *Anchor) serveProbe(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	client := &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
-			return dialInStack(ctx, entry.stack, addr)
+			return dialInStack(ctx, entry.stack, addr, false)
 		},
 		DisableKeepAlives: true,
 	}}
@@ -759,6 +768,8 @@ func (a *Anchor) serveProbe(w http.ResponseWriter, r *http.Request) {
 	outcome = outcomeNotReady
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		outcome = outcomeOK
+		// The actor answered, so its endpoints are back: let held writes go.
+		a.resumeWrites(entry)
 	}
 	w.WriteHeader(resp.StatusCode)
 }

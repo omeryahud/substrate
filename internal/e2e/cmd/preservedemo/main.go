@@ -325,7 +325,11 @@ func (d *demo) resume() error {
 }
 
 func (d *demo) waitState(want string) error {
-	deadline := time.Now().Add(2 * time.Minute)
+	return d.waitStateFor(want, 2*time.Minute)
+}
+
+func (d *demo) waitStateFor(want string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		d.mu.Lock()
 		state := d.state
@@ -339,7 +343,7 @@ func (d *demo) waitState(want string) error {
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
-	return fmt.Errorf("Actor did not reach %s within 2 minutes", want)
+	return fmt.Errorf("Actor did not reach %s within %s", want, timeout)
 }
 
 func (d *demo) waitRouteReady() error {
@@ -443,10 +447,16 @@ func (d *demo) sequence() error {
 		d.egressSend,
 		func() error { time.Sleep(time.Second); return d.suspend() },
 		func() error {
-			d.logf("info", "sending on the WebSocket while suspended: the anchor holds the connection and retransmits until the Actor is back")
+			d.logf("info", "sending on the WebSocket while suspended: the anchor holds the message and, because the template asks for it, wakes the Actor")
 			return d.send()
 		},
-		func() error { time.Sleep(2 * time.Second); return d.resume() },
+		func() error {
+			if err := d.waitStateFor("RUNNING", 30*time.Second); err == nil {
+				d.logf("state", "the Actor was woken by data; no explicit Resume was needed")
+				return nil
+			}
+			return d.resume()
+		},
 		func() error { time.Sleep(time.Second); return d.send() },
 		d.egressSend,
 		func() error {

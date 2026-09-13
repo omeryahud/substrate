@@ -63,6 +63,7 @@ func NewAnchorCmd() *cobra.Command {
 	cmd.Flags().IntVar(&cfg.Hold.MaxActors, "max-actors", 4096, "Most actor stacks this anchor holds, attached or held; further attaches are refused")
 	cmd.Flags().IntVar(&cfg.Hold.MaxConnections, "max-connections", 65536, "Most TCP connections across all actor stacks; further connections are refused")
 	cmd.Flags().DurationVar(&cfg.Hold.WakeInterval, "wake-interval", time.Second, "Least time between two resume attempts for one actor woken by data")
+	cmd.Flags().DurationVar(&cfg.Hold.UnquiesceAfter, "unquiesce-after", 3*time.Second, "How long after a worker attaches held writes are let go when no readiness probe reported the actor back sooner")
 	cmd.Flags().StringVar(&cfg.Ateapi.Address, "ateapi-address", "", "gRPC dial target of ateapi; with --ateapi-ca-file and --ateapi-client-cert, every attach is checked against the actor's assignment. Empty skips the check")
 	cmd.Flags().StringVar(&cfg.Ateapi.CAFile, "ateapi-ca-file", "", "PEM file with CAs trusted to verify the ateapi server certificate")
 	cmd.Flags().StringVar(&cfg.Ateapi.ServerName, "ateapi-server-name", "", "Hostname expected on the ateapi server certificate")

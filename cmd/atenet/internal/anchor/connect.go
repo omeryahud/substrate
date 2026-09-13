@@ -53,7 +53,7 @@ func (a *Anchor) serveConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid CONNECT port", http.StatusBadRequest)
 		return
 	}
-	upstream, err := dialInStack(r.Context(), entry.stack, net.JoinHostPort(actoraddr.ActorVethIP, strconv.Itoa(p)))
+	upstream, err := dialInStack(r.Context(), entry.stack, net.JoinHostPort(actoraddr.ActorVethIP, strconv.Itoa(p)), true)
 	if err != nil {
 		slog.WarnContext(r.Context(), "anchor CONNECT into the actor failed", slog.Any("actor", ref), slog.Int("port", p), slog.Any("err", err))
 		http.Error(w, "bad gateway", http.StatusBadGateway)
