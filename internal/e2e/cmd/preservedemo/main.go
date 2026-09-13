@@ -37,6 +37,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/agent-substrate/substrate/internal/ateclient"
 	"github.com/agent-substrate/substrate/internal/e2e"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
@@ -96,11 +97,14 @@ type pendingSend struct {
 }
 
 type demo struct {
-	ctx     context.Context
-	clients *e2e.Clients
-	router  *e2e.RouterClient
-	ref     resources.ActorRef
-	apiRef  *ateapipb.ObjectRef
+	ctx    context.Context
+	router *e2e.RouterClient
+	ref    resources.ActorRef
+	apiRef *ateapipb.ObjectRef
+
+	clientsMu sync.Mutex
+	clients   *e2e.Clients
+	clientsAt time.Time
 
 	mu          sync.Mutex
 	ws          *websocket.Conn
@@ -122,6 +126,10 @@ type demo struct {
 // any sandbox; the Actor reaches it through the egress gateway.
 const echoTarget = "echo-target.ate-demo-counter.svc.cluster.local:7777"
 
+// clientRefreshAfter is how long the demo keeps one set of cluster clients.
+// The ateapi bearer token they carry lives one hour.
+const clientRefreshAfter = 50 * time.Minute
+
 func newDemo(ctx context.Context, atespace, templateNS, template string) (*demo, error) {
 	clients, err := e2e.NewClients(ctx)
 	if err != nil {
@@ -135,6 +143,7 @@ func newDemo(ctx context.Context, atespace, templateNS, template string) (*demo,
 	d := &demo{
 		ctx:         ctx,
 		clients:     clients,
+		clientsAt:   time.Now(),
 		router:      router,
 		ref:         resources.ActorRef{Atespace: atespace, Name: name},
 		apiRef:      &ateapipb.ObjectRef{Atespace: atespace, Name: name},
@@ -161,6 +170,23 @@ func newDemo(ctx context.Context, atespace, templateNS, template string) (*demo,
 	return d, nil
 }
 
+// api returns an ateapi client whose bearer token is still valid.
+func (d *demo) api(ctx context.Context) (*ateclient.Client, error) {
+	d.clientsMu.Lock()
+	defer d.clientsMu.Unlock()
+	if time.Since(d.clientsAt) < clientRefreshAfter {
+		return d.clients.SubstrateAPI, nil
+	}
+	fresh, err := e2e.NewClients(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("refreshing the cluster clients: %w", err)
+	}
+	d.clients.Close()
+	d.clients, d.clientsAt = fresh, time.Now()
+	d.logf("info", "refreshed the ateapi credentials")
+	return fresh.SubstrateAPI, nil
+}
+
 func (d *demo) cleanup() {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -170,10 +196,33 @@ func (d *demo) cleanup() {
 	}
 	d.mu.Unlock()
 	fmt.Println("deleting the demo Actor")
-	_, _ = d.clients.SubstrateAPI.SuspendActor(ctx, &ateapipb.SuspendActorRequest{Actor: d.apiRef})
-	_, _ = d.clients.SubstrateAPI.DeleteActor(ctx, &ateapipb.DeleteActorRequest{Actor: d.apiRef})
+	if api, err := d.api(ctx); err != nil {
+		fmt.Printf("cannot reach ateapi, Actor %s/%s is left behind: %v\n", d.ref.Atespace, d.ref.Name, err)
+	} else {
+		d.suspendAndDelete(ctx, api)
+	}
 	d.router.Close()
 	d.clients.Close()
+}
+
+// suspendAndDelete waits for the suspend to settle first: DeleteActor refuses
+// an Actor that is still RUNNING or SUSPENDING.
+func (d *demo) suspendAndDelete(ctx context.Context, api *ateclient.Client) {
+	_, _ = api.SuspendActor(ctx, &ateapipb.SuspendActorRequest{Actor: d.apiRef})
+	for ctx.Err() == nil {
+		resp, err := api.GetActor(ctx, &ateapipb.GetActorRequest{Actor: d.apiRef})
+		if err != nil {
+			break
+		}
+		state := resp.GetStatus().GetState()
+		if state != ateapipb.ActorState_ACTOR_STATE_RUNNING && state != ateapipb.ActorState_ACTOR_STATE_SUSPENDING {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if _, err := api.DeleteActor(ctx, &ateapipb.DeleteActorRequest{Actor: d.apiRef}); err != nil {
+		fmt.Printf("DeleteActor: %v\n", err)
+	}
 }
 
 func (d *demo) logf(kind, format string, args ...any) {
@@ -200,7 +249,11 @@ func (d *demo) pollState() {
 			return
 		case <-ticker.C:
 		}
-		resp, err := d.clients.SubstrateAPI.GetActor(d.ctx, &ateapipb.GetActorRequest{Actor: d.apiRef})
+		api, err := d.api(d.ctx)
+		if err != nil {
+			continue
+		}
+		resp, err := api.GetActor(d.ctx, &ateapipb.GetActorRequest{Actor: d.apiRef})
 		if err != nil {
 			continue
 		}
@@ -310,7 +363,11 @@ func (d *demo) send() error {
 
 func (d *demo) suspend() error {
 	d.logf("info", "SuspendActor requested")
-	if _, err := d.clients.SubstrateAPI.SuspendActor(d.ctx, &ateapipb.SuspendActorRequest{Actor: d.apiRef}); err != nil {
+	api, err := d.api(d.ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := api.SuspendActor(d.ctx, &ateapipb.SuspendActorRequest{Actor: d.apiRef}); err != nil {
 		return fmt.Errorf("SuspendActor: %w", err)
 	}
 	return d.waitState("SUSPENDED")
@@ -318,7 +375,11 @@ func (d *demo) suspend() error {
 
 func (d *demo) resume() error {
 	d.logf("info", "ResumeActor requested")
-	if _, err := d.clients.SubstrateAPI.ResumeActor(d.ctx, &ateapipb.ResumeActorRequest{Actor: d.apiRef}); err != nil {
+	api, err := d.api(d.ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := api.ResumeActor(d.ctx, &ateapipb.ResumeActorRequest{Actor: d.apiRef}); err != nil {
 		return fmt.Errorf("ResumeActor: %w", err)
 	}
 	return d.waitState("RUNNING")
