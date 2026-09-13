@@ -121,3 +121,47 @@ spec:
   volumes:
   - name: data
     durableDir: {}
+
+---
+
+# The micro-VM counter with connection preservation opted in, the fixture the
+# e2e suite uses for preservation tests when E2E_SANDBOX_CLASS=microvm.
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: counter-preserve
+  namespace: ate-demo-counter-microvm
+  annotations:
+    ate.dev/connection-policy: Preserve
+    ate.dev/wake-on-data: "true"
+spec:
+  sandboxClass: microvm
+  containers:
+  - name: counter
+    image: ko://github.com/agent-substrate/substrate/demos/counter
+    command:
+    - /ko-app/counter
+    - --extra-port=9090
+    - --tcp-port=9091
+    readyz:
+      httpGet:
+        path: /readyz
+        port: 80
+      timeoutSeconds: 120
+    volumeMounts:
+    - name: data
+      mountPath: /home/counter
+  resources:
+    limits:
+      cpu: "2"
+      memory: 512Mi
+  workerSelector:
+    matchLabels:
+      workload: counter-microvm
+  snapshotsConfig:
+    onPause: Full
+    onCommit: Full
+    location: gs://${BUCKET_NAME}/ate-demo-counter-microvm/
+  volumes:
+  - name: data
+    durableDir: {}

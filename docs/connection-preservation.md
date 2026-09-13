@@ -689,8 +689,14 @@ Templates that do not opt in keep the current worker-local egress path.
 - The guest kernel keeps TCP state in RAM, so nothing runtime-specific is
   needed beyond the tunnel. Guest timers see the pause as a clock jump, as on
   a laptop resume; sockets survive that.
-- `deactivateActorNetworking` in `cmd/ateom-microvm/checkpoint.go:72` is
-  skipped for anchored Actors, as on gVisor.
+- `ateom-microvm` shares the worker side with `ateom-gvisor`
+  (`internal/ateomnet/anchorclient`): an anchored actor gets no worker
+  egress state, its veth carries no address, the shuttle attaches before the
+  guest boots or resumes, readiness is probed through the anchor, and the
+  shuttle stops at teardown. The micro-VM path is implemented by symmetry
+  with gVisor and has not been exercised on this development machine, which
+  cannot run micro-VMs; the `counter-preserve` template in the micro-VM demo
+  is the fixture for `E2E_SANDBOX_CLASS=microvm`.
 
 ### Failure modes
 
