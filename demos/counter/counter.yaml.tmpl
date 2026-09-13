@@ -137,3 +137,55 @@ spec:
   volumes:
   - name: data
     durableDir: {}
+
+---
+
+# A plain TCP echo service outside any sandbox, the far end for the
+# counter's /egress endpoints: an Actor opens one connection to it through
+# the egress gateway and keeps it across Suspend and Resume.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-target
+  namespace: ate-demo-counter
+  labels:
+    app: echo-target
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-target
+  template:
+    metadata:
+      labels:
+        app: echo-target
+    spec:
+      containers:
+      - name: echo
+        image: ko://github.com/agent-substrate/substrate/demos/counter
+        command:
+        - /ko-app/counter
+        - --tcp-port=7777
+        - --file-counter-directory=/tmp
+        ports:
+        - name: echo
+          containerPort: 7777
+        readinessProbe:
+          tcpSocket:
+            port: 7777
+          periodSeconds: 2
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-target
+  namespace: ate-demo-counter
+spec:
+  selector:
+    app: echo-target
+  ports:
+  - name: echo
+    port: 7777
+    targetPort: echo

@@ -87,14 +87,17 @@ type Config struct {
 	HoldTTL time.Duration
 	// LogFrames logs one line per frame at debug level.
 	LogFrames bool
+	// Egress configures actors' outbound connections and DNS.
+	Egress EgressConfig
 }
 
 // Anchor holds one network stack per actor and the listeners that reach them.
 type Anchor struct {
-	cfg       Config
-	clientCAs *x509.CertPool
-	metrics   *Metrics
-	now       func() time.Time
+	cfg         Config
+	clientCAs   *x509.CertPool
+	metrics     *Metrics
+	now         func() time.Time
+	dnsUpstream string
 
 	mu     sync.Mutex
 	actors map[resources.ActorRef]*actorEntry
@@ -110,6 +113,8 @@ type actorEntry struct {
 	// hand one actor's connection to another.
 	transport *http.Transport
 	proxy     *httputil.ReverseProxy
+	// egress is nil when the anchor runs without a certificate broker.
+	egress *actorEgress
 
 	framesToActor   atomic.Int64
 	framesFromActor atomic.Int64
@@ -154,7 +159,13 @@ func New(cfg Config) (*Anchor, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Anchor{cfg: cfg, clientCAs: pool, metrics: metrics, now: time.Now, actors: map[resources.ActorRef]*actorEntry{}}, nil
+	dnsUpstream := cfg.Egress.DNSUpstream
+	if cfg.Egress.enabled() && dnsUpstream == "" {
+		if dnsUpstream, err = defaultDNSUpstream("/etc/resolv.conf"); err != nil {
+			return nil, err
+		}
+	}
+	return &Anchor{cfg: cfg, clientCAs: pool, metrics: metrics, now: time.Now, dnsUpstream: dnsUpstream, actors: map[resources.ActorRef]*actorEntry{}}, nil
 }
 
 func loadCredentialBundle(path string) (*tls.Certificate, error) {
@@ -327,8 +338,21 @@ func (a *Anchor) handleAttach(ctx context.Context, conn net.Conn) {
 		slog.String("worker", hdr.WorkerPodUID),
 		slog.String("activation", hdr.ActivationID),
 		slog.String("boot", string(hdr.Boot)),
+		slog.String("egressGateway", hdr.EgressGateway),
 		slog.Any("neighbors", summarizeNeighbors(entry.stack.Neighbors())))
 	entry.stack.ForgetNeighbors()
+
+	if hdr.EgressGateway != "" {
+		if entry.egress == nil {
+			slog.WarnContext(ctx, "anchor: actor asked for egress but this anchor has no certificate broker; the actor has no egress",
+				slog.Any("actor", hdr.Ref()))
+		} else if err := a.activateEgress(ctx, entry, hdr.EgressGateway); err != nil {
+			// Fail closed, as a worker does: no sandbox traffic without the
+			// actor's egress identity. The shuttle redials with backoff.
+			slog.ErrorContext(ctx, "anchor: egress activation failed, closing the tunnel", slog.Any("actor", hdr.Ref()), slog.Any("err", err))
+			cancel()
+		}
+	}
 
 	err = anchornet.BridgeFrameConn(tunnelCtx, entry.stack.Link(), fc, a.frameHook(ctx, entry))
 
@@ -401,6 +425,7 @@ func (a *Anchor) dropLocked(ctx context.Context, e *actorEntry) {
 	}
 	e.mu.Unlock()
 	e.transport.CloseIdleConnections()
+	e.egress.stop(ctx)
 	e.stack.Close()
 	delete(a.actors, e.ref)
 	a.metrics.addActors(ctx, -1)
@@ -423,6 +448,12 @@ func (a *Anchor) newEntry(ref resources.ActorRef, actorUID string) (*actorEntry,
 		Rewrite:      rewriteToActor,
 		Transport:    e.transport,
 		ErrorHandler: upstreamError,
+	}
+	if a.cfg.Egress.enabled() {
+		if err := a.startEgress(e); err != nil {
+			st.Close()
+			return nil, err
+		}
 	}
 	return e, nil
 }

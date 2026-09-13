@@ -63,6 +63,8 @@ spec:
         - --trust-bundle=/run/podidentity.podcert.ate.dev/trust-bundle.pem
         - --metrics-listen-addr=:9090
         - --hold-ttl=24h
+        - --credential-broker-socket=/var/lib/ateom-gvisor/credential-broker.sock
+        - --egress-gateway-trust-bundle=/run/servicedns.podcert.ate.dev/trust-bundle.pem
         ports:
         - name: https
           containerPort: 443
@@ -90,7 +92,17 @@ spec:
         - name: podidentity
           mountPath: /run/podidentity.podcert.ate.dev
           readOnly: true
+        # The node-local atelet credential broker socket, shared with worker
+        # pods the same way, so the anchor can mint actor certificates for
+        # egress.
+        - name: run-ateom
+          mountPath: /var/lib/ateom-gvisor
+          mountPropagation: HostToContainer
       volumes:
+      - name: run-ateom
+        hostPath:
+          path: /var/lib/ateom-gvisor
+          type: DirectoryOrCreate
       - name: servicedns
         projected:
           sources:
@@ -98,6 +110,12 @@ spec:
               signerName: servicedns.podcert.ate.dev/identity
               keyType: ECDSAP256
               credentialBundlePath: credential-bundle.pem
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: trust-bundle.pem
       - name: podidentity
         projected:
           sources:

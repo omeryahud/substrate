@@ -36,11 +36,15 @@ import (
 	"github.com/agent-substrate/substrate/internal/principal"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/substratex509"
+	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
+	listersv1alpha1 "github.com/agent-substrate/substrate/pkg/client/listers/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/cache"
 )
 
 const (
@@ -163,7 +167,24 @@ func newTestServer(t *testing.T, st store.Interface) *Server {
 			t.Fatalf("start worker cache: %v", err)
 		}
 	}
-	return New("issuer", "", poolFile, st, workers)
+	return New("issuer", "", poolFile, st, workers, nil)
+}
+
+// anchoredTemplateServer is newTestServer with a template lister holding one
+// template, annotated to preserve connections or not.
+func anchoredTemplateServer(t *testing.T, st store.Interface, preserve bool) *Server {
+	t.Helper()
+	srv := newTestServer(t, st)
+	tmpl := &atev1alpha1.ActorTemplate{ObjectMeta: metav1.ObjectMeta{Namespace: "ate-demo", Name: "counter"}}
+	if preserve {
+		tmpl.Annotations = map[string]string{resources.ConnectionPolicyAnnotation: resources.ConnectionPolicyPreserve}
+	}
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	if err := indexer.Add(tmpl); err != nil {
+		t.Fatal(err)
+	}
+	srv.templates = listersv1alpha1.NewActorTemplateLister(indexer)
+	return srv
 }
 
 func TestMintJWTRequiresConfiguredJWTProvider(t *testing.T) {
@@ -526,6 +547,113 @@ func TestMintCertAuthorization(t *testing.T) {
 	}
 }
 
+// TestMintCertAnchorAuthorization covers the connection anchor's path: it is
+// entitled to an actor's certificate only when the actor exists with the
+// named incarnation and its template preserves connections.
+func TestMintCertAnchorAuthorization(t *testing.T) {
+	anchorCaller := &ateapipb.AnchorCaller{PodUid: "anchor-pod-uid", Namespace: anchorNamespace, ServiceAccount: anchorSA}
+	for name, tc := range map[string]struct {
+		preserve  bool
+		noLister  bool
+		anchor    *ateapipb.AnchorCaller
+		actor     *ateapipb.ObjectRef
+		actorUID  string
+		wantCode  codes.Code
+		wantState ateapipb.ActorState
+	}{
+		"anchor mints for an anchored actor": {
+			preserve: true,
+			anchor:   anchorCaller,
+			wantCode: codes.OK,
+		},
+		"anchor mints for a suspended anchored actor": {
+			preserve:  true,
+			anchor:    anchorCaller,
+			wantState: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
+			wantCode:  codes.OK,
+		},
+		"actor is not anchored": {
+			anchor:   anchorCaller,
+			wantCode: codes.PermissionDenied,
+		},
+		"anchors are not enabled": {
+			preserve: true,
+			noLister: true,
+			anchor:   anchorCaller,
+			wantCode: codes.PermissionDenied,
+		},
+		"caller is not the anchor service account": {
+			preserve: true,
+			anchor:   &ateapipb.AnchorCaller{PodUid: "x", Namespace: anchorNamespace, ServiceAccount: "some-workload"},
+			wantCode: codes.PermissionDenied,
+		},
+		"actor incarnation differs": {
+			preserve: true,
+			anchor:   anchorCaller,
+			actorUID: "other-uid",
+			wantCode: codes.FailedPrecondition,
+		},
+		"actor does not exist": {
+			preserve: true,
+			anchor:   anchorCaller,
+			actor:    &ateapipb.ObjectRef{Atespace: testAtespace, Name: "no-such-actor"},
+			wantCode: codes.PermissionDenied,
+		},
+		"actor reference is malformed": {
+			preserve: true,
+			anchor:   anchorCaller,
+			actor:    &ateapipb.ObjectRef{Atespace: "Not Valid", Name: testActorName},
+			wantCode: codes.InvalidArgument,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			st, cleanup := storetest.SetupTestStore(t)
+			defer cleanup()
+			state := tc.wantState
+			if state == ateapipb.ActorState_ACTOR_STATE_UNSPECIFIED {
+				state = ateapipb.ActorState_ACTOR_STATE_RUNNING
+			}
+			seedActor(t, ctx, st, actorFixture{state: state, workerNode: testNode, noWorker: true, noPlacement: true})
+			var srv *Server
+			if tc.noLister {
+				srv = newTestServer(t, st)
+			} else {
+				srv = anchoredTemplateServer(t, st, tc.preserve)
+			}
+			actor, err := st.GetActor(ctx, resources.ActorRef{Atespace: testAtespace, Name: testActorName})
+			if err != nil {
+				t.Fatalf("read seeded actor: %v", err)
+			}
+			req := mintCertRequest(t, actor.GetMetadata().GetUid())
+			req.Worker = nil
+			req.Anchor = tc.anchor
+			req.Actor = &ateapipb.ObjectRef{Atespace: testAtespace, Name: testActorName}
+			if tc.actor != nil {
+				req.Actor = tc.actor
+			}
+			if tc.actorUID != "" {
+				req.ExpectedActorUid = tc.actorUID
+			}
+			resp, err := srv.MintCert(ctxWithCert(ateletCertOn(t, testNode)), req)
+			if got := status.Code(err); got != tc.wantCode {
+				t.Fatalf("MintCert() code = %v (err = %v), want %v", got, err, tc.wantCode)
+			}
+			if tc.wantCode != codes.OK {
+				return
+			}
+			leaf, err := x509.ParseCertificate(resp.GetActorCertificates()[0])
+			if err != nil {
+				t.Fatalf("parse minted certificate: %v", err)
+			}
+			want := "spiffe://substrate-actor.local/atespace/" + testAtespace + "/actor/" + testActorName
+			if len(leaf.URIs) != 1 || leaf.URIs[0].String() != want {
+				t.Errorf("minted SPIFFE URI = %v, want %q", leaf.URIs, want)
+			}
+		})
+	}
+}
+
 func TestMintCertRejectsUnsupportedPurpose(t *testing.T) {
 	server := newTestServer(t, nil)
 	for name, purpose := range map[string]ateapipb.ActorCertificatePurpose{
@@ -736,7 +864,7 @@ func TestMintCertAuthorizesBeforeSigning(t *testing.T) {
 	if err := workers.Start(cacheCtx); err != nil {
 		t.Fatal(err)
 	}
-	srv := New("issuer", "", filepath.Join(t.TempDir(), "missing.json"), st, workers)
+	srv := New("issuer", "", filepath.Join(t.TempDir(), "missing.json"), st, workers, nil)
 
 	actor, err := st.GetActor(ctx, resources.ActorRef{Atespace: testAtespace, Name: testActorName})
 	if err != nil {

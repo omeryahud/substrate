@@ -39,6 +39,16 @@ const (
 	ingressDurationMetricName = "atenet.anchor.ingress.duration"
 	probesMetricName          = "atenet.anchor.probes"
 	probeDurationMetricName   = "atenet.anchor.probe.duration"
+	egressActivationsName     = "atenet.anchor.egress.activations"
+	egressConnectionsName     = "atenet.anchor.egress.connections"
+	dnsQueriesMetricName      = "atenet.anchor.dns.queries"
+)
+
+// Outcomes for the egress activation instrument.
+const (
+	outcomeActivated    = "activated"
+	outcomeMintFailed   = "mint_failed"
+	outcomeClientFailed = "client_failed"
 )
 
 // Outcomes for the attach, ingress, and probe instruments.
@@ -65,16 +75,19 @@ const (
 // Metrics bundles the anchor's instruments. A nil *Metrics is safe to use:
 // every method is a no-op, which keeps tests simple.
 type Metrics struct {
-	attach          metric.Int64Counter
-	tunnelsActive   metric.Int64UpDownCounter
-	actors          metric.Int64UpDownCounter
-	holdsExpired    metric.Int64Counter
-	frames          metric.Int64Counter
-	frameBytes      metric.Int64Counter
-	ingressRequests metric.Int64Counter
-	ingressDuration metric.Float64Histogram
-	probes          metric.Int64Counter
-	probeDuration   metric.Float64Histogram
+	attach            metric.Int64Counter
+	tunnelsActive     metric.Int64UpDownCounter
+	actors            metric.Int64UpDownCounter
+	holdsExpired      metric.Int64Counter
+	frames            metric.Int64Counter
+	frameBytes        metric.Int64Counter
+	ingressRequests   metric.Int64Counter
+	ingressDuration   metric.Float64Histogram
+	probes            metric.Int64Counter
+	probeDuration     metric.Float64Histogram
+	egressActivations metric.Int64Counter
+	egressConnections metric.Int64Counter
+	dnsQueries        metric.Int64Counter
 }
 
 // NewMetrics creates the anchor's instruments from the global MeterProvider.
@@ -135,7 +148,47 @@ func NewMetrics() (*Metrics, error) {
 		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5)); err != nil {
 		return nil, fmt.Errorf("create %s: %w", probeDurationMetricName, err)
 	}
+	if m.egressActivations, err = meter.Int64Counter(egressActivationsName,
+		metric.WithUnit("{activation}"),
+		metric.WithDescription("attempts to open an actor's egress through the gateway, by outcome")); err != nil {
+		return nil, fmt.Errorf("create %s: %w", egressActivationsName, err)
+	}
+	if m.egressConnections, err = meter.Int64Counter(egressConnectionsName,
+		metric.WithUnit("{connection}"),
+		metric.WithDescription("outbound TCP connections actors opened through the anchor")); err != nil {
+		return nil, fmt.Errorf("create %s: %w", egressConnectionsName, err)
+	}
+	if m.dnsQueries, err = meter.Int64Counter(dnsQueriesMetricName,
+		metric.WithUnit("{query}"),
+		metric.WithDescription("actor DNS queries forwarded by the anchor, by outcome")); err != nil {
+		return nil, fmt.Errorf("create %s: %w", dnsQueriesMetricName, err)
+	}
 	return m, nil
+}
+
+func (m *Metrics) recordEgressActivation(ctx context.Context, outcome string) {
+	if m == nil {
+		return
+	}
+	m.egressActivations.Add(ctx, 1, metric.WithAttributes(ateattr.AnchorOutcomeKey.String(outcome)))
+}
+
+func (m *Metrics) recordEgressConnection(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.egressConnections.Add(ctx, 1)
+}
+
+func (m *Metrics) recordDNSQuery(ctx context.Context, answered bool) {
+	if m == nil {
+		return
+	}
+	outcome := outcomeOK
+	if !answered {
+		outcome = outcomeFailed
+	}
+	m.dnsQueries.Add(ctx, 1, metric.WithAttributes(ateattr.AnchorOutcomeKey.String(outcome)))
 }
 
 func (m *Metrics) recordAttach(ctx context.Context, outcome, boot string) {

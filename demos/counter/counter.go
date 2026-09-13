@@ -174,6 +174,14 @@ func main() {
 		}
 	})
 
+	// /egress/* keeps one outbound TCP connection open on request, so a test
+	// can prove an egress connection survives the actor's suspend and resume.
+	egress := &egressConnection{}
+	defaultMux.HandleFunc("/egress/open", egress.open)
+	defaultMux.HandleFunc("/egress/send", egress.send)
+	defaultMux.HandleFunc("/egress/status", egress.status)
+	defaultMux.HandleFunc("/egress/close", egress.close)
+
 	go func() {
 		slog.InfoContext(ctx, "Starting counter server on port 80")
 		if err := http.ListenAndServe(":80", defaultMux); err != nil {

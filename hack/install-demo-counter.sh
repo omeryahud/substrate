@@ -65,6 +65,7 @@ demo-counter_deploy() {
   run_kubectl_fatal rollout status deployment/counter -n ate-demo-counter --timeout=300s
   run_kubectl_fatal wait --for=condition=Ready actortemplate/counter -n ate-demo-counter --timeout=300s
   run_kubectl_fatal wait --for=condition=Ready actortemplate/counter-preserve -n ate-demo-counter --timeout=300s
+  run_kubectl_fatal rollout status deployment/echo-target -n ate-demo-counter --timeout=300s
 }
 
 demo-counter_delete() {

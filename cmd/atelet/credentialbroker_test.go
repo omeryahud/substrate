@@ -69,6 +69,60 @@ func workerContext(t *testing.T, podUID string) context.Context {
 	return peer.NewContext(context.Background(), &peer.Peer{AuthInfo: credentials.TLSInfo{State: tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}}})
 }
 
+// TestCredentialBrokerForwardsAnchorIdentity: a connection anchor is passed
+// to ateapi as an anchor naming its actor, never as a worker.
+func TestCredentialBrokerForwardsAnchorIdentity(t *testing.T) {
+	identity := &brokerIdentityClient{}
+	broker := &credentialBroker{actorIdentityClient: identity}
+	anchor := identityCertificate(t, &substratex509.PodIdentity{
+		Namespace: anchorNamespace, ServiceAccountName: anchorServiceAccount, ServiceAccountUID: "sa-uid",
+		PodName: "atenet-anchor-1", PodUID: "anchor-uid", NodeName: "node", NodeUID: "node-uid",
+	})
+	ctx := peer.NewContext(context.Background(), &peer.Peer{AuthInfo: credentials.TLSInfo{State: tls.ConnectionState{PeerCertificates: []*x509.Certificate{anchor}}}})
+	if _, err := broker.MintActorCertificate(ctx, &ateletpb.MintActorCertificateRequest{
+		CertificateSigningRequest: []byte{4, 5, 6},
+		ExpectedActorUid:          "actor-uid",
+		Atespace:                  "team-a",
+		ActorName:                 "chatbot-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := &ateapipb.MintCertRequest{
+		Anchor:                    &ateapipb.AnchorCaller{PodUid: "anchor-uid", Namespace: anchorNamespace, ServiceAccount: anchorServiceAccount},
+		Actor:                     &ateapipb.ObjectRef{Atespace: "team-a", Name: "chatbot-1"},
+		ExpectedActorUid:          "actor-uid",
+		CertificateSigningRequest: []byte{4, 5, 6},
+		Purpose:                   ateapipb.ActorCertificatePurpose_ACTOR_CERTIFICATE_PURPOSE_ATUNNEL,
+	}
+	if !proto.Equal(identity.request, want) {
+		t.Fatalf("MintCert request = %+v, want %+v", identity.request, want)
+	}
+	if identity.request.GetWorker() != nil {
+		t.Fatal("anchor was forwarded as a worker")
+	}
+}
+
+func identityCertificate(t *testing.T, identity *substratex509.PodIdentity) *x509.Certificate {
+	t.Helper()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour)}
+	if err := substratex509.AddPodIdentityToCertificate(identity, template); err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, key.Public(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
+}
+
 func TestVerifyClientOnSameNode(t *testing.T) {
 	state := tls.ConnectionState{PeerCertificates: []*x509.Certificate{workerCertificate(t, "worker-uid", "node-a")}}
 	nodeA := &substratex509.PodIdentity{NodeName: "node-a", NodeUID: "node-uid"}

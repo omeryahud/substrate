@@ -31,6 +31,13 @@ message MintActorCertificateRequest {
   // Actor incarnation this activation expects. Ateapi resolves the actor from
   // the authenticated worker and rejects the request if its UID differs.
   string expected_actor_uid = 2;
+
+  // Set by a connection anchor, which holds many actors and is not assigned
+  // one the way a worker is: the actor the certificate is for. Ateapi
+  // verifies that the actor exists with expected_actor_uid and is anchored.
+  // Workers leave these empty.
+  string atespace = 3;
+  string actor_name = 4;
 }
 
 message MintActorCertificateResponse {

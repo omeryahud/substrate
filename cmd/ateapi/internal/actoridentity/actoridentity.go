@@ -35,6 +35,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/principal"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/substratex509"
+	listersv1alpha1 "github.com/agent-substrate/substrate/pkg/client/listers/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -57,17 +58,21 @@ type Server struct {
 	// is entitled to the actor it is asking for a credential for.
 	store   store.Interface
 	workers *workercache.Cache
+	// templates decides whether an actor is anchored, which is what entitles
+	// a connection anchor to its certificate. Nil denies every anchor.
+	templates listersv1alpha1.ActorTemplateLister
 }
 
 var _ ateapipb.ActorIdentityServer = (*Server)(nil)
 
-func New(actorIdentityJWTIssuer, actorIDJWTPoolFile, actorIDCAPoolFile string, store store.Interface, workers *workercache.Cache) *Server {
+func New(actorIdentityJWTIssuer, actorIDJWTPoolFile, actorIDCAPoolFile string, store store.Interface, workers *workercache.Cache, templates listersv1alpha1.ActorTemplateLister) *Server {
 	return &Server{
 		actorIdentityJWTIssuer: actorIdentityJWTIssuer,
 		actorIDJWTPoolFile:     actorIDJWTPoolFile,
 		actorIDCAPoolFile:      actorIDCAPoolFile,
 		store:                  store,
 		workers:                workers,
+		templates:              templates,
 	}
 }
 
@@ -82,6 +87,8 @@ const (
 	ateletTrustDomain        = "cluster.local"
 	ateletNamespace          = "ate-system"
 	ateletSA                 = "atelet"
+	anchorNamespace          = "ate-system"
+	anchorSA                 = "atenet-anchor"
 	actorCertificateLifetime = time.Hour
 )
 
@@ -154,13 +161,19 @@ func (s *Server) MintCert(ctx context.Context, req *ateapipb.MintCertRequest) (*
 		return nil, status.Error(codes.InvalidArgument, "unsupported actor certificate purpose")
 	}
 
-	if err := validateWorkerRef(req.GetWorker()); err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "invalid worker: %v", err)
-	}
 	if req.GetExpectedActorUid() == "" {
 		return nil, status.Error(codes.InvalidArgument, "expected_actor_uid is required")
 	}
-	actor, actorRef, err := s.authorizeActor(ctx, caller, req)
+	var actor *ateapipb.Actor
+	var actorRef resources.ActorRef
+	if req.GetAnchor() != nil {
+		actor, actorRef, err = s.authorizeAnchorActor(ctx, caller, req)
+	} else {
+		if err := validateWorkerRef(req.GetWorker()); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid worker: %v", err)
+		}
+		actor, actorRef, err = s.authorizeActor(ctx, caller, req)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -302,6 +315,49 @@ func authenticateAtelet(ctx context.Context) (*ateletCaller, error) {
 	}
 
 	return &ateletCaller{podName: identity.PodName, nodeName: identity.NodeName}, nil
+}
+
+// authorizeAnchorActor resolves the actor a connection anchor asks for. An
+// anchor is not assigned an actor the way a worker is, so entitlement comes
+// from the actor's template: only an actor whose template preserves
+// connections has its egress opened by the anchor, and only for the
+// incarnation the anchor names.
+func (s *Server) authorizeAnchorActor(ctx context.Context, caller *ateletCaller, req *ateapipb.MintCertRequest) (*ateapipb.Actor, resources.ActorRef, error) {
+	anchor := req.GetAnchor()
+	deny := func(reason string, args ...any) error {
+		slog.WarnContext(ctx, "ActorIdentity denied anchor: "+reason,
+			append([]any{slog.String("anchorPod", anchor.GetPodUid()), slog.Any("actor", req.GetActor()), slog.String("callerPod", caller.podName)}, args...)...)
+		return status.Errorf(codes.PermissionDenied, "caller is not permitted to mint credentials for this actor")
+	}
+	if anchor.GetNamespace() != anchorNamespace || anchor.GetServiceAccount() != anchorSA {
+		return nil, resources.ActorRef{}, deny("caller is not the connection anchor")
+	}
+	if s.templates == nil {
+		return nil, resources.ActorRef{}, deny("anchors are not enabled")
+	}
+	actorRef := resources.ActorRefFromObjectRef(req.GetActor())
+	if !resources.IsValidResourceName(actorRef.Atespace) || !resources.IsValidResourceName(actorRef.Name) {
+		return nil, resources.ActorRef{}, status.Error(codes.InvalidArgument, "invalid actor reference")
+	}
+	actor, err := s.store.GetActor(ctx, actorRef)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, resources.ActorRef{}, deny("actor not found")
+		}
+		slog.ErrorContext(ctx, "ActorIdentity: failed to read actor", slog.Any("actor", actorRef), slog.Any("err", err))
+		return nil, resources.ActorRef{}, status.Error(codes.Internal, "failed to look up actor")
+	}
+	if actor.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_DELETING {
+		return nil, resources.ActorRef{}, status.Error(codes.FailedPrecondition, "actor is being deleted")
+	}
+	tmpl, err := s.templates.ActorTemplates(actor.GetActorTemplateNamespace()).Get(actor.GetActorTemplateName())
+	if err != nil {
+		return nil, resources.ActorRef{}, deny("actor template not found", slog.Any("err", err))
+	}
+	if !resources.PreservesConnections(tmpl.Annotations) {
+		return nil, resources.ActorRef{}, deny("actor is not anchored")
+	}
+	return actor, actorRef, nil
 }
 
 // validateWorkerRef checks the reference to the Worker the certificate is

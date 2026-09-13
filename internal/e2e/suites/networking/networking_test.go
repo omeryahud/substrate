@@ -163,6 +163,62 @@ func TestActorWebSocketSurvivesSuspend(t *testing.T) {
 	t.Logf("WebSocket survived suspend and resume: echo succeeded on the same connection")
 }
 
+// echoTargetAddress is the plain TCP echo service the counter demo deploys
+// outside any sandbox, reached from an Actor through the egress gateway.
+const echoTargetAddress = "echo-target.ate-demo-counter.svc.cluster.local:7777"
+
+// TestActorEgressSurvivesSuspend is the egress half of the connection
+// preservation claim: an outbound connection the Actor opened before Suspend
+// still carries data after Resume, because its Actor-facing end lives in the
+// anchor and its far end in the egress gateway.
+func TestActorEgressSurvivesSuspend(t *testing.T) {
+	ctx := context.Background()
+	actorName, _ := createAndResumeActor(t, ctx, "egress-preserve", counterPreserveFixture())
+	router := mustRouterClient(t, ctx)
+	defer router.Close()
+	actorRef := resources.ActorRef{Atespace: networkingAtespace, Name: actorName}
+	clients := e2e.GetClients()
+
+	get := func(path string) (int, string) {
+		resp, err := router.Get(ctx, actorRef, path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, strings.TrimSpace(string(body))
+	}
+	waitForRouteReady(t, "Actor readyz before egress", func() (*http.Response, error) {
+		return router.Get(ctx, actorRef, "/readyz")
+	})
+	if code, body := get("/egress/open?addr=" + echoTargetAddress); code != http.StatusOK {
+		t.Fatalf("egress open returned HTTP %d: %s", code, body)
+	}
+	if code, body := get("/egress/send?msg=before"); code != http.StatusOK || body != "before" {
+		t.Fatalf("egress echo before suspend = %d %q, want 200 \"before\"", code, body)
+	}
+	_, statusBefore := get("/egress/status")
+	t.Logf("egress connection %s", statusBefore)
+
+	suspendNetworkingActor(ctx, t, clients, actorName)
+	waitForNetworkingActorState(ctx, t, clients, actorName, ateapipb.ActorState_ACTOR_STATE_SUSPENDED)
+	t.Log("actor suspended with the egress connection still open")
+	resumeNetworkingActor(ctx, t, clients, actorName)
+	waitForNetworkingActorState(ctx, t, clients, actorName, ateapipb.ActorState_ACTOR_STATE_RUNNING)
+	t.Log("actor resumed")
+
+	waitForRouteReady(t, "Actor readyz after resume", func() (*http.Response, error) {
+		return router.Get(ctx, actorRef, "/readyz")
+	})
+	if code, body := get("/egress/send?msg=after"); code != http.StatusOK || body != "after" {
+		t.Fatalf("egress echo after resume = %d %q, want 200 \"after\"", code, body)
+	}
+	if _, statusAfter := get("/egress/status"); statusAfter != statusBefore {
+		t.Fatalf("egress connection changed across suspend: before %q, after %q", statusBefore, statusAfter)
+	}
+	t.Log("egress connection survived suspend and resume: echo succeeded on the same connection")
+}
+
 func dialWebSocketWithRetry(t *testing.T, ctx context.Context, router *e2e.RouterClient, actorRef resources.ActorRef) *websocket.Conn {
 	t.Helper()
 	var lastErr error

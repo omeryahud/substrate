@@ -1033,6 +1033,22 @@ message MintCertRequest {
   string expected_actor_uid = 3;
 
   ActorCertificatePurpose purpose = 4;
+
+  // Set instead of worker when a connection anchor asks for the certificate,
+  // as authenticated by the node-local atelet. An anchor holds many actors and
+  // is not assigned one, so it names the actor; ateapi verifies that the actor
+  // exists with expected_actor_uid and that its template preserves
+  // connections.
+  AnchorCaller anchor = 5;
+  ObjectRef actor = 6;
+}
+
+// AnchorCaller is the pod identity of a connection anchor, copied by atelet
+// from the anchor's certificate.
+message AnchorCaller {
+  string pod_uid = 1;
+  string namespace = 2;
+  string service_account = 3;
 }
 
 enum ActorCertificatePurpose {

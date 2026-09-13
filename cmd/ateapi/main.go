@@ -204,7 +204,7 @@ func main() {
 	}
 	sm := controlapi.NewService(persistence, workerCache, actorTemplateLister, workerPoolLister, sandboxConfigLister, csiDriverConfigLister, storageClassLister, ateletDialer, instruments, *egressGatewayAddress, anchorConfig, volPlugins)
 
-	actorIdentitySrv := actoridentity.New(actorIdentityJWTIssuer, *actorIDJWTPoolFile, *actorIDCAPoolFile, persistence, workerCache)
+	actorIdentitySrv := actoridentity.New(actorIdentityJWTIssuer, *actorIDJWTPoolFile, *actorIDCAPoolFile, persistence, workerCache, actorTemplateLister)
 	debugSrv := debugapi.NewService(persistence)
 
 	lisCfg := &net.ListenConfig{}

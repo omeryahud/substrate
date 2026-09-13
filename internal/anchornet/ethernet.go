@@ -26,6 +26,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 )
 
 // NewEthernetStack builds a stack whose NIC speaks Ethernet with a fixed MAC
@@ -40,7 +41,7 @@ func NewEthernetStack(localIP string, prefixLen int, mac string) (*Stack, error)
 	}
 	s := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, arp.NewProtocol},
-		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
 	})
 
 	ep := channel.New(channelDepth, linkMTU, tcpip.LinkAddress(hw))
@@ -52,7 +53,7 @@ func NewEthernetStack(localIP string, prefixLen int, mac string) (*Stack, error)
 	if err != nil {
 		return nil, err
 	}
-	return &Stack{stack: s, link: ep, addr: addr}, nil
+	return &Stack{stack: s, link: ep, addr: addr, prefixLen: prefixLen}, nil
 }
 
 // addAddressAndDefaultRoute gives the NIC localIP and a default route out of it.

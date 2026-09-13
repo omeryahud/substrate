@@ -46,7 +46,7 @@ import (
 // anchor's attach and control listeners present the service-DNS certificate,
 // which the worker verifies with the same trust bundle it uses for the egress
 // gateway.
-func (s *AteomService) attachAnchor(ctx context.Context, anchor *ateompb.ConnectionAnchor, atespace, actorName, actorUID string, boot anchortun.BootKind) (func(), error) {
+func (s *AteomService) attachAnchor(ctx context.Context, anchor *ateompb.ConnectionAnchor, egress *ateompb.EgressGateway, atespace, actorName, actorUID string, boot anchortun.BootKind) (func(), error) {
 	host, _, err := net.SplitHostPort(anchor.GetAttachAddress())
 	if err != nil {
 		return nil, fmt.Errorf("invalid anchor attach address %q: %w", anchor.GetAttachAddress(), err)
@@ -58,12 +58,13 @@ func (s *AteomService) attachAnchor(ctx context.Context, anchor *ateompb.Connect
 		CredentialBundlePath: s.workerCredentialBundlePath,
 		TrustBundlePath:      s.egressGatewayTrustBundlePath,
 		Header: anchortun.AttachHeader{
-			Atespace:     atespace,
-			ActorName:    actorName,
-			ActorUID:     actorUID,
-			WorkerPodUID: *podUID,
-			ActivationID: rand.Text(),
-			Boot:         boot,
+			Atespace:      atespace,
+			ActorName:     actorName,
+			ActorUID:      actorUID,
+			WorkerPodUID:  *podUID,
+			ActivationID:  rand.Text(),
+			Boot:          boot,
+			EgressGateway: egress.GetAddress(),
 		},
 	})
 }

@@ -22,6 +22,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/serverboot"
 )
 
@@ -54,6 +55,9 @@ func NewAnchorCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cfg.MetricsAddr, "metrics-listen-addr", ":9090", "Address the Prometheus metrics and health server listens on; empty disables it")
 	cmd.Flags().DurationVar(&cfg.HoldTTL, "hold-ttl", 24*time.Hour, "Drop an actor's held connections when no worker reattaches within this time; 0 holds forever")
 	cmd.Flags().BoolVar(&cfg.LogFrames, "log-frames", false, "Log one line per Ethernet frame at debug level")
+	cmd.Flags().StringVar(&cfg.Egress.BrokerSocketPath, "credential-broker-socket", ateompath.CredentialBrokerSocket, "Node-local atelet socket that mints actor certificates for egress; empty disables actor egress")
+	cmd.Flags().StringVar(&cfg.Egress.GatewayTrustBundlePath, "egress-gateway-trust-bundle", "/run/servicedns.podcert.ate.dev/trust-bundle.pem", "PEM trust bundle that verifies the egress gateway's serving certificate")
+	cmd.Flags().StringVar(&cfg.Egress.DNSUpstream, "dns-upstream", "", "Resolver (host:port) actor DNS queries are forwarded to; empty uses /etc/resolv.conf")
 	cmd.Flags().StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, error")
 	return cmd
 }

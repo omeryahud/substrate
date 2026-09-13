@@ -68,6 +68,9 @@ func TestAttachHeader_Valid(t *testing.T) {
 		{"badCharsActivation", func(h *AttachHeader) { h.ActivationID = "act 42" }, true},
 		{"emptyBoot", func(h *AttachHeader) { h.Boot = "" }, true},
 		{"unknownBoot", func(h *AttachHeader) { h.Boot = "warm" }, true},
+		{"egressGateway", func(h *AttachHeader) { h.EgressGateway = "atenet-egress.ate-system.svc:443" }, false},
+		{"egressGatewayNoPort", func(h *AttachHeader) { h.EgressGateway = "atenet-egress.ate-system.svc" }, true},
+		{"egressGatewayEmptyHost", func(h *AttachHeader) { h.EgressGateway = ":443" }, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := validHeader()

@@ -35,26 +35,44 @@ type credentialBroker struct {
 	actorIdentityClient ateapipb.ActorIdentityClient
 }
 
+// The connection anchor's identity. It mints actor certificates for the
+// actors it holds, so ateapi authorizes it by the actor's template rather
+// than by a worker assignment.
+const (
+	anchorNamespace      = "ate-system"
+	anchorServiceAccount = "atenet-anchor"
+)
+
 func (b *credentialBroker) MintActorCertificate(ctx context.Context, req *ateletpb.MintActorCertificateRequest) (*ateletpb.MintActorCertificateResponse, error) {
 	// TODO: Before release, require the egress PEP to reject actor certificates
 	// whose ActorIdentity purpose is not atunnel.
-	// Worker identity comes only from the mTLS certificate. The expected actor
+	// Caller identity comes only from the mTLS certificate. The expected actor
 	// UID is a stale-activation guard; ateapi derives the actor authoritatively.
-	workerIdentity, err := authenticatedWorkerIdentity(ctx)
+	callerIdentity, err := authenticatedWorkerIdentity(ctx)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := b.actorIdentityClient.MintCert(ctx, &ateapipb.MintCertRequest{
-		// Workers are global-scoped and named by their pod UID.
-		Worker:                    &ateapipb.ObjectRef{Name: workerIdentity.PodUID},
+	mint := &ateapipb.MintCertRequest{
 		ExpectedActorUid:          req.GetExpectedActorUid(),
 		CertificateSigningRequest: req.GetCertificateSigningRequest(),
 		Purpose:                   ateapipb.ActorCertificatePurpose_ACTOR_CERTIFICATE_PURPOSE_ATUNNEL,
-	})
+	}
+	if isAnchor(callerIdentity) {
+		mint.Anchor = &ateapipb.AnchorCaller{PodUid: callerIdentity.PodUID, Namespace: callerIdentity.Namespace, ServiceAccount: callerIdentity.ServiceAccountName}
+		mint.Actor = &ateapipb.ObjectRef{Atespace: req.GetAtespace(), Name: req.GetActorName()}
+	} else {
+		// Workers are global-scoped and named by their pod UID.
+		mint.Worker = &ateapipb.ObjectRef{Name: callerIdentity.PodUID}
+	}
+	resp, err := b.actorIdentityClient.MintCert(ctx, mint)
 	if err != nil {
 		return nil, fmt.Errorf("mint actor certificate: %w", err)
 	}
 	return &ateletpb.MintActorCertificateResponse{ActorCertificates: resp.GetActorCertificates()}, nil
+}
+
+func isAnchor(identity *substratex509.PodIdentity) bool {
+	return identity.Namespace == anchorNamespace && identity.ServiceAccountName == anchorServiceAccount
 }
 
 func authenticatedWorkerIdentity(ctx context.Context) (*substratex509.PodIdentity, error) {

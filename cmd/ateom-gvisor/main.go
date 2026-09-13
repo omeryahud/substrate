@@ -644,7 +644,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 	}
 	var stopShuttle func()
 	if anchored {
-		stop, err := s.attachAnchor(ctx, req.GetAnchor(), req.GetAtespace(), req.GetActorName(), req.GetActorUid(), anchortun.BootFresh)
+		stop, err := s.attachAnchor(ctx, req.GetAnchor(), req.GetEgressGateway(), req.GetAtespace(), req.GetActorName(), req.GetActorUid(), anchortun.BootFresh)
 		if err != nil {
 			s.activeActor.Store(nil)
 			if cerr := ateomnet.CleanupActorNetwork(ctx, s.interiorNetNS); cerr != nil {
@@ -960,7 +960,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 		if req.GetScope() != ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL {
 			boot = anchortun.BootFresh
 		}
-		stop, err := s.attachAnchor(ctx, req.GetAnchor(), req.GetAtespace(), req.GetActorName(), req.GetActorUid(), boot)
+		stop, err := s.attachAnchor(ctx, req.GetAnchor(), req.GetEgressGateway(), req.GetAtespace(), req.GetActorName(), req.GetActorUid(), boot)
 		if err != nil {
 			s.activeActor.Store(nil)
 			if cerr := ateomnet.CleanupActorNetwork(ctx, s.interiorNetNS); cerr != nil {

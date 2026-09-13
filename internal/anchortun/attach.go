@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"regexp"
 
 	"github.com/agent-substrate/substrate/internal/resources"
@@ -58,6 +59,10 @@ type AttachHeader struct {
 	WorkerPodUID string   `json:"workerPodUID"`
 	ActivationID string   `json:"activationID"`
 	Boot         BootKind `json:"boot"`
+	// EgressGateway is the host:port of the egress gateway the anchor opens
+	// the actor's outbound connections through. Empty leaves the actor
+	// without egress, as the control plane decided.
+	EgressGateway string `json:"egressGateway,omitempty"`
 }
 
 // Valid reports whether the header names a well-formed actor, a worker, an
@@ -83,6 +88,12 @@ func (h AttachHeader) Valid() error {
 	}
 	if h.Boot != BootRestore && h.Boot != BootFresh {
 		return fmt.Errorf("anchortun: invalid boot kind %q", h.Boot)
+	}
+	if h.EgressGateway != "" {
+		host, port, err := net.SplitHostPort(h.EgressGateway)
+		if err != nil || host == "" || port == "" || len(h.EgressGateway) > 253 {
+			return fmt.Errorf("anchortun: invalid egress gateway %q", h.EgressGateway)
+		}
 	}
 	return nil
 }

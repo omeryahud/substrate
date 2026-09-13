@@ -18,15 +18,12 @@ import (
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
+	"github.com/agent-substrate/substrate/internal/resources"
 )
 
 const (
-	// ConnectionPolicyAnnotation on an ActorTemplate selects how an Actor's
-	// open TCP connections behave across Suspend and Resume.
-	ConnectionPolicyAnnotation = "ate.dev/connection-policy"
-	// ConnectionPolicyPreserve terminates the Actor's connections in the
-	// connection anchor so they survive Suspend and Resume on any worker.
-	ConnectionPolicyPreserve = "Preserve"
+	ConnectionPolicyAnnotation = resources.ConnectionPolicyAnnotation
+	ConnectionPolicyPreserve   = resources.ConnectionPolicyPreserve
 )
 
 // AnchorConfig names the connection anchor's listeners. All three must be set
@@ -43,7 +40,7 @@ func (c AnchorConfig) enabled() bool {
 }
 
 func preservesConnections(tmpl *atev1alpha1.ActorTemplate) bool {
-	return tmpl != nil && tmpl.Annotations[ConnectionPolicyAnnotation] == ConnectionPolicyPreserve
+	return tmpl != nil && resources.PreservesConnections(tmpl.Annotations)
 }
 
 // anchored reports whether an Actor of tmpl has its connections anchored.
