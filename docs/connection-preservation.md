@@ -969,6 +969,11 @@ against a WorkerPool of at least two workers, on gVisor and on
   before the suspend. The counter's TCP echo delays a line that starts with
   `delay=<duration> `; `/egress/request` sends without waiting and a
   background reader collects the replies.
+- Plain HTTP (`TestActorHTTPResponseWakesActor`): a goroutine in the Actor
+  blocks in an ordinary `http.Get` to the echo target's `/delay?d=20s`, the
+  Actor is suspended while the call is blocked, the response wakes it, and
+  `/fetch/result` shows the call returned its normal result. The counter's
+  `/fetch/start` runs the call, `/fetch` is the synchronous form.
 - A `Reset` template keeps today's behavior (connection closed at suspend).
 - Raw TCP through `RouterClient.Connect` once CONNECT is routed to the
   anchor's relay.
