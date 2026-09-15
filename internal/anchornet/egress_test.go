@@ -152,9 +152,10 @@ func TestServeDNS_ForwardsAndAnswersFromTheQueriedAddress(t *testing.T) {
 	// The forwarder binds in the background; a real resolver retries too.
 	buf := make([]byte, 64)
 	var n int
-	for attempt := 0; attempt < 5; attempt++ {
+	for attempt := 0; attempt < 10; attempt++ {
 		if _, err = conn.Write([]byte("query")); err != nil {
-			t.Fatal(err)
+			time.Sleep(20 * time.Millisecond)
+			continue
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
 		if n, err = conn.Read(buf); err == nil {
