@@ -66,6 +66,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", d.servePage)
+	mux.HandleFunc("/flow", serveFlow)
 	mux.HandleFunc("/events", d.serveEvents)
 	mux.HandleFunc("/api/status", d.serveStatus)
 	mux.HandleFunc("/api/connect", d.action(d.connect))
@@ -83,7 +84,7 @@ func main() {
 		<-ctx.Done()
 		_ = srv.Close()
 	}()
-	fmt.Printf("demo page: http://%s/\n", *listen)
+	fmt.Printf("demo page: http://%s/  flow view: http://%s/flow\n", *listen, *listen)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
@@ -91,8 +92,14 @@ func main() {
 
 type event struct {
 	At   string `json:"at"`
+	TS   int64  `json:"ts"`
 	Kind string `json:"kind"`
 	Text string `json:"text"`
+	// Stage names the step of a slow request the flow page animates; State
+	// and Worker carry the Actor's placement for stage "state".
+	Stage  string `json:"stage,omitempty"`
+	State  string `json:"state,omitempty"`
+	Worker string `json:"worker,omitempty"`
 }
 
 type pendingSend struct {
@@ -316,7 +323,17 @@ func (d *demo) suspendAndDelete(ctx context.Context, api *ateclient.Client) {
 }
 
 func (d *demo) logf(kind, format string, args ...any) {
-	ev := event{At: time.Now().Format("15:04:05.000"), Kind: kind, Text: fmt.Sprintf(format, args...)}
+	d.emit(event{Kind: kind, Text: fmt.Sprintf(format, args...)})
+}
+
+// stagef logs like logf and tags the event with a stage for the flow page.
+func (d *demo) stagef(stage, kind, format string, args ...any) {
+	d.emit(event{Stage: stage, Kind: kind, Text: fmt.Sprintf(format, args...)})
+}
+
+func (d *demo) emit(ev event) {
+	now := time.Now()
+	ev.At, ev.TS = now.Format("15:04:05.000"), now.UnixMilli()
 	d.mu.Lock()
 	d.log = append(d.log, ev)
 	for ch := range d.subscribers {
@@ -326,7 +343,7 @@ func (d *demo) logf(kind, format string, args ...any) {
 		}
 	}
 	d.mu.Unlock()
-	log.Printf("%-6s %s", kind, ev.Text)
+	log.Printf("%-6s %s", ev.Kind, ev.Text)
 }
 
 // pollState watches the Actor and logs every state or worker change.
@@ -354,11 +371,11 @@ func (d *demo) pollState() {
 		d.state, d.worker = state, worker
 		d.mu.Unlock()
 		if changed {
+			text := "Actor is " + state
 			if worker != "" {
-				d.logf("state", "Actor is %s on worker %s", state, worker)
-			} else {
-				d.logf("state", "Actor is %s", state)
+				text += " on worker " + worker
 			}
+			d.emit(event{Stage: "state", Kind: "state", Text: text, State: state, Worker: worker})
 		}
 	}
 }
@@ -452,7 +469,7 @@ func (d *demo) send() error {
 }
 
 func (d *demo) suspend() error {
-	d.logf("info", "SuspendActor requested")
+	d.stagef("suspending", "info", "SuspendActor requested")
 	api, err := d.api(d.ctx)
 	if err != nil {
 		return err
@@ -676,7 +693,7 @@ func (d *demo) slowRequest() error {
 	if err != nil {
 		return err
 	}
-	d.logf("egress", "Actor asked the echo target for a reply in %s (slow request %d) and went on; nothing inside it is blocked on the answer", d.slowDelay, n)
+	d.stagef("request-sent", "egress", "Actor asked the echo target for a reply in %s (slow request %d) and went on; nothing inside it is blocked on the answer", d.slowDelay, n)
 	workerAfter, err := d.suspendUntilWoken()
 	if err != nil {
 		return err
@@ -684,7 +701,7 @@ func (d *demo) slowRequest() error {
 	d.mu.Lock()
 	egress := d.egressState
 	d.mu.Unlock()
-	d.logf("state", "the reply woke the Actor %s after the request; worker before %s, after %s", time.Since(askedAt).Round(time.Second), workerBefore, workerAfter)
+	d.stagef("woken", "state", "the reply woke the Actor %s after the request; worker before %s, after %s", time.Since(askedAt).Round(time.Second), workerBefore, workerAfter)
 	if err := d.waitRouteReady(); err != nil {
 		return err
 	}
@@ -695,8 +712,8 @@ func (d *demo) slowRequest() error {
 	if len(lines) <= len(before) {
 		return errors.New("the reply never reached the Actor")
 	}
-	d.logf("egress", "Actor read %q on the same egress connection (%s), %s after asking", lines[len(lines)-1], egress, time.Since(askedAt).Round(time.Second))
-	d.logf("done", "asked on worker %s, suspended, woken by the reply and answered on worker %s, one egress connection throughout", workerBefore, workerAfter)
+	d.stagef("delivered", "egress", "Actor read %q on the same egress connection (%s), %s after asking", lines[len(lines)-1], egress, time.Since(askedAt).Round(time.Second))
+	d.stagef("done", "done", "asked on worker %s, suspended, woken by the reply and answered on worker %s, one egress connection throughout", workerBefore, workerAfter)
 	return nil
 }
 
@@ -722,12 +739,12 @@ func (d *demo) slowHTTP() error {
 		return fmt.Errorf("fetch start: HTTP %d: %s", code, body)
 	}
 	askedAt := time.Now()
-	d.logf("egress", "Actor called http.Get(%q) (slow HTTP request %d); that goroutine is blocked until the response arrives", target, n)
+	d.stagef("request-sent", "egress", "Actor called http.Get(%q) (slow HTTP request %d); that goroutine is blocked until the response arrives", target, n)
 	workerAfter, err := d.suspendUntilWoken()
 	if err != nil {
 		return err
 	}
-	d.logf("state", "the response woke the Actor %s after the call; worker before %s, after %s", time.Since(askedAt).Round(time.Second), workerBefore, workerAfter)
+	d.stagef("woken", "state", "the response woke the Actor %s after the call; worker before %s, after %s", time.Since(askedAt).Round(time.Second), workerBefore, workerAfter)
 	if err := d.waitRouteReady(); err != nil {
 		return err
 	}
@@ -738,8 +755,8 @@ func (d *demo) slowHTTP() error {
 	if code != http.StatusOK || !strings.HasPrefix(body, "200 ") {
 		return fmt.Errorf("fetch result: HTTP %d: %s", code, body)
 	}
-	d.logf("egress", "http.Get returned %q; the Actor's code saw one ordinary blocking call", body)
-	d.logf("done", "called http.Get on worker %s, suspended while blocked, woken by the response and finished on worker %s", workerBefore, workerAfter)
+	d.stagef("delivered", "egress", "http.Get returned %q; the Actor's code saw one ordinary blocking call", body)
+	d.stagef("done", "done", "called http.Get on worker %s, suspended while blocked, woken by the response and finished on worker %s", workerBefore, workerAfter)
 	return nil
 }
 
@@ -753,7 +770,7 @@ func (d *demo) suspendUntilWoken() (string, error) {
 	if err := d.suspend(); err != nil {
 		return "", err
 	}
-	d.logf("info", "suspended with the request outstanding: the anchor keeps the connection to the echo target open and will wake the Actor when the reply arrives")
+	d.stagef("suspended", "info", "suspended with the request outstanding: the anchor keeps the connection to the echo target open and will wake the Actor when the reply arrives")
 	if err := d.waitStateFor("RUNNING", d.slowDelay+90*time.Second); err != nil {
 		return "", fmt.Errorf("the reply did not wake the Actor: %w", err)
 	}
