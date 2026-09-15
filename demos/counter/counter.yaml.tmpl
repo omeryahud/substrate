@@ -177,6 +177,8 @@ spec:
         ports:
         - name: echo
           containerPort: 7777
+        - name: http
+          containerPort: 80
         readinessProbe:
           tcpSocket:
             port: 7777
@@ -196,3 +198,6 @@ spec:
   - name: echo
     port: 7777
     targetPort: echo
+  - name: http
+    port: 80
+    targetPort: http

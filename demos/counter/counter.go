@@ -181,6 +181,13 @@ func main() {
 	defaultMux.HandleFunc("/egress/send", egress.send)
 	defaultMux.HandleFunc("/egress/request", egress.request)
 	defaultMux.HandleFunc("/egress/replies", egress.replies)
+	// /delay is served by the echo target: a plain HTTP response that takes
+	// a while. /fetch/* makes a plain blocking HTTP GET from inside the Actor.
+	defaultMux.HandleFunc("/delay", serveDelay)
+	fetches := &fetcher{}
+	defaultMux.HandleFunc("/fetch", fetches.fetch)
+	defaultMux.HandleFunc("/fetch/start", fetches.start)
+	defaultMux.HandleFunc("/fetch/result", fetches.result)
 	defaultMux.HandleFunc("/egress/status", egress.status)
 	defaultMux.HandleFunc("/egress/close", egress.close)
 
