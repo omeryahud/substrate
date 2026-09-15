@@ -65,7 +65,7 @@ func TestFlowPageKnowsEveryStage(t *testing.T) {
 			t.Errorf("flow page does not handle stage %q", stage)
 		}
 	}
-	for _, id := range []string{"b-a", "b-b", "b-anchor", "b-gw", "b-echo", "b-api", "gate-box"} {
+	for _, id := range []string{"b-a", "b-b", "b-anchor", "b-gw", "b-echo", "b-api", "gate-box", "a-sh", "b-sh"} {
 		if !strings.Contains(body, `id="`+id+`"`) {
 			t.Errorf("flow page lacks component %q", id)
 		}

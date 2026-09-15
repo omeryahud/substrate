@@ -50,7 +50,7 @@ func main() {
 	atespace := flag.String("atespace", "preserve-demo", "atespace for the demo Actor")
 	templateNS := flag.String("template-namespace", "ate-demo-counter", "ActorTemplate namespace")
 	template := flag.String("template", "counter-preserve", "ActorTemplate with ate.dev/connection-policy=Preserve")
-	slowDelay := flag.Duration("slow-reply-delay", 30*time.Second, "how long the echo target takes to answer the slow request")
+	slowDelay := flag.Duration("slow-reply-delay", 10*time.Second, "how long the echo target takes to answer the slow request")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -894,6 +894,7 @@ const page = `<!DOCTYPE html>
  header{padding:16px 24px;border-bottom:1px solid #30363d;display:flex;gap:28px;align-items:center;flex-wrap:wrap}
  .k{color:#8b949e;font-size:12px;text-transform:uppercase;letter-spacing:.06em}
  .v{font-size:18px;font-weight:600}
+ a{color:#58a6ff}
  .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:13px;font-weight:600}
  .RUNNING{background:#1a7f37;color:#fff}.SUSPENDED{background:#6e40c9;color:#fff}.RESUMING,.SUSPENDING{background:#9e6a03;color:#fff}.CRASHED{background:#cf222e;color:#fff}
  .bar{padding:12px 24px;display:flex;gap:10px;flex-wrap:wrap;border-bottom:1px solid #30363d}
@@ -911,6 +912,7 @@ const page = `<!DOCTYPE html>
  <div><div class="k">WebSocket</div><div class="v" id="ws">not connected</div></div>
  <div><div class="k">Messages</div><div class="v" id="msgs">0 sent, 0 echoed</div></div>
  <div><div class="k">Egress</div><div class="v" id="egress">not open</div></div>
+ <div style="margin-left:auto"><a href="/flow">flow view</a></div>
 </header>
 <div class="bar">
  <button class="primary" onclick="post('sequence')">Run the whole sequence</button>

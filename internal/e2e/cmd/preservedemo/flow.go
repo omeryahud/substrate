@@ -70,43 +70,46 @@ const flowPage = `<!DOCTYPE html>
  <span id="busy" style="color:#8b949e"></span>
 </div>
 <svg id="map" viewBox="0 0 1180 560" xmlns="http://www.w3.org/2000/svg">
- <defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#30363d"/></marker></defs>
- <path id="e-a" class="edge" d="M250,120 C320,120 330,215 400,215"/>
- <text class="edgelbl" x="285" y="150">shuttle: raw frames over mTLS</text>
- <path id="e-b" class="edge" d="M250,430 C320,430 330,335 400,335"/>
- <text class="edgelbl" x="285" y="410">shuttle: raw frames over mTLS</text>
+ <path id="e-a" class="edge" d="M250,135 C320,135 330,215 400,215"/>
+ <text class="edgelbl" x="282" y="165">raw frames over mTLS</text>
+ <path id="e-b" class="edge" d="M250,425 C320,425 330,335 400,335"/>
+ <text class="edgelbl" x="282" y="405">raw frames over mTLS</text>
  <path id="e-gw" class="edge" d="M700,275 L800,275"/>
- <text class="edgelbl" x="705" y="265">atunnel CONNECT</text>
+ <text class="edgelbl" x="702" y="265">CONNECT over mTLS</text>
  <path id="e-echo" class="edge" d="M930,275 L1000,275"/>
  <path id="e-api" class="edge" d="M550,395 L550,460"/>
  <text class="edgelbl" x="560" y="432">ResumeActor</text>
- <path id="e-restore" class="edge" d="M400,490 C330,490 300,470 250,455"/>
- <text class="edgelbl" x="262" y="503">restore snapshot</text>
+ <path id="e-restore" class="edge" d="M400,490 C330,490 300,470 250,470"/>
+ <text class="edgelbl" x="262" y="512">restore snapshot</text>
 
- <g id="b-a"><rect class="box" x="40" y="60" width="210" height="130"/>
-  <text class="title" x="56" y="86">Worker A</text><text class="sub" id="a-pod" x="56" y="104">-</text>
-  <rect class="inner" x="56" y="116" width="178" height="60"/>
-  <text class="lbl" id="a-l1" x="66" y="140">sandbox</text><text class="lbl" id="a-l2" x="66" y="160">idle</text></g>
+ <g id="b-a"><rect class="box" x="40" y="40" width="210" height="165"/>
+  <text class="title" x="56" y="66">Worker A pod</text><text class="sub" id="a-pod" x="56" y="84">-</text>
+  <rect class="inner" x="56" y="96" width="178" height="40"/>
+  <text class="lbl" x="66" y="113">ateom: frame shuttle</text><text class="sub" id="a-sh" x="66" y="129">idle</text>
+  <rect class="inner" x="56" y="142" width="178" height="52"/>
+  <text class="lbl" id="a-l1" x="66" y="162">sandbox: app</text><text class="sub" id="a-l2" x="66" y="181">idle</text></g>
 
- <g id="b-b"><rect class="box" x="40" y="370" width="210" height="130"/>
-  <text class="title" x="56" y="396">Worker B</text><text class="sub" id="b-pod" x="56" y="414">-</text>
-  <rect class="inner" x="56" y="426" width="178" height="60"/>
-  <text class="lbl" id="b-l1" x="66" y="450">no sandbox</text><text class="lbl" id="b-l2" x="66" y="470"></text></g>
+ <g id="b-b"><rect class="box" x="40" y="330" width="210" height="165"/>
+  <text class="title" x="56" y="356">Worker B pod</text><text class="sub" id="b-pod" x="56" y="374">-</text>
+  <rect class="inner" x="56" y="386" width="178" height="40"/>
+  <text class="lbl" x="66" y="403">ateom: frame shuttle</text><text class="sub" id="b-sh" x="66" y="419">idle</text>
+  <rect class="inner" x="56" y="432" width="178" height="52"/>
+  <text class="lbl" id="b-l1" x="66" y="452">sandbox: none</text><text class="sub" id="b-l2" x="66" y="471"></text></g>
 
  <g id="b-anchor"><rect class="box" x="400" y="150" width="300" height="245"/>
-  <text class="title" x="416" y="176">Anchor (ate-system Deployment)</text>
+  <text class="title" x="416" y="176">Anchor pod (ate-system)</text>
   <rect class="inner" x="416" y="190" width="268" height="52"/>
-  <text class="lbl" x="426" y="212">netstack: the Actor's TCP peer</text><text class="lbl" id="ns-l" x="426" y="231">169.254.17.1 to 169.254.17.2</text>
+  <text class="lbl" x="426" y="212">netstack: the Actor's TCP peer</text><text class="sub" id="ns-l" x="426" y="231">169.254.17.1 to 169.254.17.2</text>
   <rect class="inner" id="gate-box" x="416" y="250" width="268" height="52"/>
-  <text class="lbl" x="426" y="272">write gate</text><text class="lbl" id="gate-l" x="426" y="291">open: writes toward the Actor flow</text>
+  <text class="lbl" x="426" y="272">write gate</text><text class="sub" id="gate-l" x="426" y="291">open: writes toward the Actor flow</text>
   <rect class="inner" x="416" y="310" width="268" height="52"/>
-  <text class="lbl" x="426" y="332">egress relay (atunnel client)</text><text class="lbl" id="relay-l" x="426" y="351">no tunnel</text></g>
+  <text class="lbl" x="426" y="332">atunnel egress client</text><text class="sub" id="relay-l" x="426" y="351">no tunnel</text></g>
 
- <g id="b-gw"><rect class="box" x="800" y="225" width="130" height="100"/>
-  <text class="title" x="816" y="251">Egress</text><text class="title" x="816" y="270">gateway</text><text class="sub" id="gw-l" x="816" y="300">authorizes the Actor</text></g>
+ <g id="b-gw"><rect class="box" x="800" y="215" width="130" height="120"/>
+  <text class="title" x="816" y="241">Egress gateway</text><text class="sub" x="816" y="261">Envoy + ext-proc</text><text class="sub" x="816" y="278">checks the Actor</text><text class="sub" x="816" y="295">certificate</text><text class="sub" id="gw-l" x="816" y="320">no tunnel</text></g>
 
- <g id="b-echo"><rect class="box" x="1000" y="225" width="150" height="100"/>
-  <text class="title" x="1016" y="251">Echo target</text><text class="sub" id="echo-l1" x="1016" y="275">/delay</text><text class="lbl" id="echo-l2" x="1016" y="300">idle</text></g>
+ <g id="b-echo"><rect class="box" x="1000" y="215" width="150" height="120"/>
+  <text class="title" x="1016" y="241">Echo target</text><text class="sub" id="echo-l1" x="1016" y="265">/delay</text><text class="lbl" id="echo-l2" x="1016" y="300">idle</text></g>
 
  <g id="b-api"><rect class="box" x="400" y="460" width="300" height="70"/>
   <text class="title" x="416" y="486">ateapi</text><text class="sub" id="api-l" x="416" y="508">control plane</text></g>
@@ -116,7 +119,7 @@ const flowPage = `<!DOCTYPE html>
 <script>
 function post(a){fetch('/api/'+a,{method:'POST'})}
 var $=function(id){return document.getElementById(id)};
-var P={appA:[145,146],shA:[325,168],ns:[550,216],gate:[550,276],relay:[550,336],gw:[865,275],echo:[1075,275],api:[550,495],appB:[145,456],shB:[325,382]};
+var P={appA:[145,168],shA:[145,116],ns:[550,216],gate:[550,276],relay:[550,336],gw:[865,275],echo:[1075,275],api:[550,495],appB:[145,458],shB:[145,406]};
 var loadedAt=Date.now();
 var queue=Promise.resolve();
 var workers={};        // pod name -> 'a' | 'b'
@@ -158,6 +161,7 @@ function boxFor(pod){
 }
 function appPoint(box){return box==='b'?P.appB:P.appA}
 function shuttlePoint(box){return box==='b'?P.shB:P.shA}
+function shuttle(box,text){setText(box+'-sh',text)}
 
 function startEchoCountdown(seconds){
  echoDeadline=Date.now()+seconds*1000;
@@ -174,15 +178,15 @@ function onState(ev){
  var box=boxFor(ev.worker);
  if(ev.state==='RUNNING'&&box){
   current=box;setBox(box,true);
-  setText(box+'-l1','sandbox running');setText(box+'-l2',flowKind==='http'?'app goroutine ready':'app ready');
+  setText(box+'-l1','sandbox: app');setText(box+'-l2',flowKind==='http'?'app goroutine ready':'app ready');shuttle(box,'attached to the anchor');
  }
  if(ev.state==='SUSPENDING'&&current){setText(current+'-l2','checkpointing...')}
  if(ev.state==='SUSPENDED'&&current){
-  setText(current+'-l1','no sandbox');setText(current+'-l2','snapshot saved, worker released');setBox(current,false);
+  setText(current+'-l1','sandbox: none');setText(current+'-l2','snapshot saved, worker released');shuttle(current,'idle');setBox(current,false);
   gate('hold','holding: nothing is written toward the Actor');
  }
  if(ev.state==='RESUMING'&&box){
-  setBox(box,true);setText(box+'-l1','restoring the sandbox');setText(box+'-l2','same memory, same sockets');
+  setBox(box,true);setText(box+'-l1','sandbox: restoring');setText(box+'-l2','same memory, same sockets');shuttle(box,'attaching');
  }
 }
 
@@ -197,11 +201,13 @@ function onStage(ev){
   enqueue(function(){
    caption(flowKind==='http'?'The app goroutine calls http.Get. The request leaves the sandbox as raw frames.':'The app writes one line on its TCP connection. The bytes leave the sandbox as raw frames.');
    setText(from+'-l2',flowKind==='http'?'blocked in http.Get':'waiting for the reply line');
+   shuttle(from,'carrying frames to the anchor');
    light('e-'+from,true);
    return travel([appPoint(from),shuttlePoint(from),P.ns],650);
   });
-  enqueue(function(){caption('The anchor’s netstack is the TCP peer. The relay opens a CONNECT tunnel through the egress gateway.');setText('relay-l','tunnel open to the echo target');light('e-gw',true);light('e-echo',true);return travel([P.ns,P.gate,P.relay,P.gw,P.echo],600)});
-  enqueue(function(){caption('The echo target has the request and starts its timer. The call inside the Actor is blocked on the response.');setText('gw-l','tunnel authorized');startEchoCountdown(secs);light('e-'+from,false);return sleep(300)});
+  enqueue(function(){caption('The anchor’s netstack is the TCP peer. The relay opens an atunnel: HTTP CONNECT over mTLS with the Actor’s own certificate.');setText('relay-l','tunnel open to the echo target');light('e-gw',true);return travel([P.ns,P.gate,P.relay,P.gw],600)});
+  enqueue(function(){caption('The egress gateway checks the certificate, asks ateapi that the Actor is real and running, and dials the echo target.');setText('gw-l','tunnel authorized');light('e-echo',true);return travel([P.gw,P.echo],600)});
+  enqueue(function(){caption('The echo target has the request and starts its timer. The call inside the Actor is blocked on the response.');startEchoCountdown(secs);light('e-'+from,false);return sleep(300)});
  }
  if(ev.stage==='suspending'){
   enqueue(function(){caption('SuspendActor: ateapi tells the anchor to quiesce, then checkpoints the sandbox.');gate('hold','holding: quiesced before the checkpoint');return travel([P.api,P.gate],500,'ctl')});
@@ -210,11 +216,11 @@ function onStage(ev){
   enqueue(function(){caption('Suspended. No sandbox anywhere. The anchor keeps both ends of the connection: the Actor side in its netstack and the tunnel to the echo target.');return sleep(200)});
  }
  if(ev.stage==='woken'){
-  var to=boxFor((/after ([^\s,]+)/.exec(ev.text)||[])[1])||current||'b';
-  enqueue(function(){caption('The response arrives at the anchor. The relay writes it toward the Actor and the write is held.');setText('echo-l2','answered');return travel([P.echo,P.gw,P.relay,P.gate],600,'resp')});
+  var to=boxFor((/worker before \S+, after (\S+)/.exec(ev.text)||[])[1])||current||'b';
+  enqueue(function(){caption('The response comes back through the atunnel. The relay writes it toward the Actor and the write is held.');setText('echo-l2','answered');return travel([P.echo,P.gw,P.relay,P.gate],600,'resp')});
   enqueue(function(){gate('held','holding one reply for a suspended Actor');caption('First held write: the anchor asks ateapi to resume the Actor (wake on data).');light('e-api',true);return travel([P.gate,P.api],550,'ctl')});
-  enqueue(function(){caption('ateapi picks a worker with room and restores the snapshot there.');light('e-restore',true);setBox(to,true);setText(to+'-l1','restoring the sandbox');setText(to+'-l2','same memory, same sockets');return travel([P.api,appPoint(to)],700,'ctl')});
-  enqueue(function(){caption('The new worker’s shuttle attaches to the same netstack. The anchor forgets the old MAC and probes readiness.');light('e-'+to,true);current=to;setText(to+'-l1','sandbox running');return travel([appPoint(to),shuttlePoint(to),P.ns],600,'ctl')});
+  enqueue(function(){caption('ateapi picks a worker with room and restores the snapshot there.');light('e-restore',true);setBox(to,true);setText(to+'-l1','sandbox: restoring');setText(to+'-l2','same memory, same sockets');return travel([P.api,appPoint(to)],700,'ctl')});
+  enqueue(function(){caption('The new worker’s shuttle attaches to the same netstack. The anchor forgets the old MAC and probes readiness.');light('e-'+to,true);current=to;setText(to+'-l1','sandbox: app');shuttle(to,'attached to the anchor');return travel([appPoint(to),shuttlePoint(to),P.ns],600,'ctl')});
   enqueue(function(){gate('open','open: the held reply is released');caption('The gate opens and the held response goes down the new tunnel into the same socket.');return travel([P.gate,P.ns,shuttlePoint(to),appPoint(to)],600,'resp')});
   enqueue(function(){light('e-api',false);light('e-restore',false);light('e-gw',false);light('e-echo',false);setText(to+'-l2',flowKind==='http'?'http.Get returned':'reply line read');return sleep(100)});
  }
