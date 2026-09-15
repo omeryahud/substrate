@@ -746,7 +746,10 @@ func (d *demo) slowHTTP() error {
 // suspendUntilWoken suspends the Actor with a reply outstanding and waits for
 // that reply to bring it back. It returns the worker the Actor came back on.
 func (d *demo) suspendUntilWoken() (string, error) {
-	time.Sleep(time.Second)
+	// The egress gateway refuses a tunnel for an Actor that is already
+	// suspending, and the sandbox's connect succeeds before that tunnel is
+	// authorized. Two seconds is plenty for it to settle.
+	time.Sleep(2 * time.Second)
 	if err := d.suspend(); err != nil {
 		return "", err
 	}

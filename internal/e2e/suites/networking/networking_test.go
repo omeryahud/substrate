@@ -344,6 +344,10 @@ func TestActorHTTPResponseWakesActor(t *testing.T) {
 // it back, and returns the worker it came back on.
 func suspendAndWaitForWake(ctx context.Context, t *testing.T, clients *e2e.Clients, actorName string, askedAt time.Time, replyDelay time.Duration) string {
 	t.Helper()
+	// The sandbox's connect succeeds inside the anchor before the egress
+	// gateway has authorized the tunnel, and the gateway refuses tunnels for
+	// an Actor that is already suspending. Let the tunnel settle first.
+	time.Sleep(2 * time.Second)
 	suspendNetworkingActor(ctx, t, clients, actorName)
 	waitForNetworkingActorState(ctx, t, clients, actorName, ateapipb.ActorState_ACTOR_STATE_SUSPENDED)
 	t.Log("actor suspended while its request is outstanding")
