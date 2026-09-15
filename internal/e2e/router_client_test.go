@@ -24,6 +24,35 @@ import (
 	"github.com/agent-substrate/substrate/internal/resources"
 )
 
+func TestRouterClientPing(t *testing.T) {
+	client := &RouterClient{
+		baseURL: "http://router.test",
+		http: &http.Client{Transport: testRoundTripper(func(request *http.Request) (*http.Response, error) {
+			if request.Host != "router.test" {
+				t.Errorf("host = %q, want the router itself", request.Host)
+			}
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader("no route")),
+				Header:     make(http.Header),
+			}, nil
+		})},
+	}
+	if err := client.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping with a 404 from the router: %v, want nil", err)
+	}
+
+	dead := &RouterClient{
+		baseURL: "http://router.test",
+		http: &http.Client{Transport: testRoundTripper(func(*http.Request) (*http.Response, error) {
+			return nil, io.EOF
+		})},
+	}
+	if err := dead.Ping(context.Background()); err == nil {
+		t.Fatal("Ping through a dead port-forward = nil, want an error")
+	}
+}
+
 func TestRouterClientPostJSON(t *testing.T) {
 	client := &RouterClient{
 		baseURL: "http://router.test",

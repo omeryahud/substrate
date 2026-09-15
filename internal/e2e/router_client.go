@@ -108,6 +108,21 @@ func (c *RouterClient) Get(ctx context.Context, actorRef resources.ActorRef, pat
 	return c.request(ctx, http.MethodGet, actorRef, path, nil)
 }
 
+// Ping checks that the port-forward to the router still answers. Any HTTP
+// status counts. The request names no Actor, so nothing is resumed.
+func (c *RouterClient) Ping(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
 // PostJSON issues a POST with a JSON body to an Actor through the router. The
 // caller must close the response body.
 func (c *RouterClient) PostJSON(ctx context.Context, actorRef resources.ActorRef, path string, body []byte) (*http.Response, error) {

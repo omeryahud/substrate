@@ -98,13 +98,15 @@ type pendingSend struct {
 
 type demo struct {
 	ctx    context.Context
-	router *e2e.RouterClient
 	ref    resources.ActorRef
 	apiRef *ateapipb.ObjectRef
 
 	clientsMu sync.Mutex
 	clients   *e2e.Clients
 	clientsAt time.Time
+	routerMu  sync.Mutex
+	router    *e2e.RouterClient
+	routerAt  time.Time
 
 	mu          sync.Mutex
 	ws          *websocket.Conn
@@ -145,6 +147,7 @@ func newDemo(ctx context.Context, atespace, templateNS, template string) (*demo,
 		clients:     clients,
 		clientsAt:   time.Now(),
 		router:      router,
+		routerAt:    time.Now(),
 		ref:         resources.ActorRef{Atespace: atespace, Name: name},
 		apiRef:      &ateapipb.ObjectRef{Atespace: atespace, Name: name},
 		state:       "creating",
@@ -162,6 +165,7 @@ func newDemo(ctx context.Context, atespace, templateNS, template string) (*demo,
 		return nil, fmt.Errorf("CreateActor: %w", err)
 	}
 	go d.pollState()
+	go d.keepRouterAlive()
 	go func() {
 		if err := d.resume(); err != nil {
 			d.logf("error", "first resume: %v", err)
@@ -187,6 +191,82 @@ func (d *demo) api(ctx context.Context) (*ateclient.Client, error) {
 	return fresh.SubstrateAPI, nil
 }
 
+func (d *demo) currentRouter() *e2e.RouterClient {
+	d.routerMu.Lock()
+	defer d.routerMu.Unlock()
+	return d.router
+}
+
+// routerDead reports whether the router port-forward stopped answering.
+// The kubelet drops streaming connections that idle for hours, and a dead
+// port-forward answers every request with an empty reply.
+func (d *demo) routerDead() bool {
+	ctx, cancel := context.WithTimeout(d.ctx, 5*time.Second)
+	defer cancel()
+	return d.currentRouter().Ping(ctx) != nil
+}
+
+func (d *demo) reconnectRouter() error {
+	d.routerMu.Lock()
+	defer d.routerMu.Unlock()
+	if time.Since(d.routerAt) < 10*time.Second {
+		return nil
+	}
+	fresh, err := e2e.NewRouterClient(d.ctx)
+	if err != nil {
+		return fmt.Errorf("rebuilding the router port-forward: %w", err)
+	}
+	d.router.Close()
+	d.router, d.routerAt = fresh, time.Now()
+	d.logf("info", "rebuilt the router port-forward")
+	return nil
+}
+
+// routerGet sends one GET to the Actor through the router. When the
+// request failed because the port-forward is dead, it is retried once on a
+// fresh one.
+func (d *demo) routerGet(path string) (*http.Response, error) {
+	resp, err := d.currentRouter().Get(d.ctx, d.ref, path)
+	if err == nil || !d.routerDead() {
+		return resp, err
+	}
+	if rerr := d.reconnectRouter(); rerr != nil {
+		return nil, err
+	}
+	return d.currentRouter().Get(d.ctx, d.ref, path)
+}
+
+func (d *demo) dialWebSocket() (*websocket.Conn, error) {
+	conn, _, err := d.currentRouter().DialWebSocket(d.ctx, d.ref, "/ws")
+	if err == nil || !d.routerDead() {
+		return conn, err
+	}
+	if rerr := d.reconnectRouter(); rerr != nil {
+		return nil, err
+	}
+	conn, _, err = d.currentRouter().DialWebSocket(d.ctx, d.ref, "/ws")
+	return conn, err
+}
+
+// keepRouterAlive pings the router once a minute so the port-forward never
+// idles out, and rebuilds it when it died anyway.
+func (d *demo) keepRouterAlive() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if d.routerDead() {
+			if err := d.reconnectRouter(); err != nil {
+				d.logf("error", "%v", err)
+			}
+		}
+	}
+}
+
 func (d *demo) cleanup() {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -201,7 +281,7 @@ func (d *demo) cleanup() {
 	} else {
 		d.suspendAndDelete(ctx, api)
 	}
-	d.router.Close()
+	d.currentRouter().Close()
 	d.clients.Close()
 }
 
@@ -298,7 +378,7 @@ func (d *demo) connect() error {
 	if err := d.waitRouteReady(); err != nil {
 		return err
 	}
-	conn, _, err := d.router.DialWebSocket(d.ctx, d.ref, "/ws")
+	conn, err := d.dialWebSocket()
 	if err != nil {
 		return fmt.Errorf("WebSocket dial through the router: %w", err)
 	}
@@ -410,7 +490,7 @@ func (d *demo) waitStateFor(want string, timeout time.Duration) error {
 func (d *demo) waitRouteReady() error {
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err := d.router.Get(d.ctx, d.ref, "/readyz")
+		resp, err := d.routerGet("/readyz")
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
@@ -428,7 +508,7 @@ func (d *demo) waitRouteReady() error {
 
 // actorGet sends one HTTP request to the Actor through the router.
 func (d *demo) actorGet(path string) (int, string, error) {
-	resp, err := d.router.Get(d.ctx, d.ref, path)
+	resp, err := d.routerGet(path)
 	if err != nil {
 		return 0, "", err
 	}
