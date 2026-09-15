@@ -76,6 +76,7 @@ func main() {
 	mux.HandleFunc("/api/egress/send", d.action(d.egressSend))
 	mux.HandleFunc("/api/sequence", d.action(d.sequence))
 	mux.HandleFunc("/api/slow", d.action(d.slowRequest))
+	mux.HandleFunc("/api/slowhttp", d.action(d.slowHTTP))
 	mux.HandleFunc("/api/quit", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK); stop() })
 	srv := &http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
@@ -132,7 +133,10 @@ type demo struct {
 
 // echoTarget is the plain TCP echo service the counter demo deploys outside
 // any sandbox; the Actor reaches it through the egress gateway.
-const echoTarget = "echo-target.ate-demo-counter.svc.cluster.local:7777"
+const (
+	echoTargetHost = "echo-target.ate-demo-counter.svc.cluster.local"
+	echoTarget     = echoTargetHost + ":7777"
+)
 
 // clientRefreshAfter is how long the demo keeps one set of cluster clients.
 // The ateapi bearer token they carry lives one hour.
@@ -673,16 +677,12 @@ func (d *demo) slowRequest() error {
 		return err
 	}
 	d.logf("egress", "Actor asked the echo target for a reply in %s (slow request %d) and went on; nothing inside it is blocked on the answer", d.slowDelay, n)
-	time.Sleep(time.Second)
-	if err := d.suspend(); err != nil {
+	workerAfter, err := d.suspendUntilWoken()
+	if err != nil {
 		return err
 	}
-	d.logf("info", "suspended with the request outstanding: the anchor keeps the connection to the echo target open and will wake the Actor when the reply arrives")
-	if err := d.waitStateFor("RUNNING", d.slowDelay+90*time.Second); err != nil {
-		return fmt.Errorf("the reply did not wake the Actor: %w", err)
-	}
 	d.mu.Lock()
-	workerAfter, egress := d.worker, d.egressState
+	egress := d.egressState
 	d.mu.Unlock()
 	d.logf("state", "the reply woke the Actor %s after the request; worker before %s, after %s", time.Since(askedAt).Round(time.Second), workerBefore, workerAfter)
 	if err := d.waitRouteReady(); err != nil {
@@ -698,6 +698,66 @@ func (d *demo) slowRequest() error {
 	d.logf("egress", "Actor read %q on the same egress connection (%s), %s after asking", lines[len(lines)-1], egress, time.Since(askedAt).Round(time.Second))
 	d.logf("done", "asked on worker %s, suspended, woken by the reply and answered on worker %s, one egress connection throughout", workerBefore, workerAfter)
 	return nil
+}
+
+// slowHTTP is the plain HTTP form of the slow request: a goroutine in the
+// Actor blocks in http.Get, the Actor is suspended while it waits, and the
+// response wakes it. The call then returns as if nothing had happened.
+func (d *demo) slowHTTP() error {
+	if !d.setBusy() {
+		return errors.New("a sequence is already running")
+	}
+	defer d.clearBusy()
+	d.mu.Lock()
+	workerBefore := d.worker
+	d.slowCount++
+	n := d.slowCount
+	d.mu.Unlock()
+	target := fmt.Sprintf("http://%s/delay?d=%s", echoTargetHost, d.slowDelay)
+	code, body, err := d.actorGet("/fetch/start?url=" + url.QueryEscape(target))
+	if err != nil {
+		return fmt.Errorf("fetch start: %w", err)
+	}
+	if code != http.StatusOK {
+		return fmt.Errorf("fetch start: HTTP %d: %s", code, body)
+	}
+	askedAt := time.Now()
+	d.logf("egress", "Actor called http.Get(%q) (slow HTTP request %d); that goroutine is blocked until the response arrives", target, n)
+	workerAfter, err := d.suspendUntilWoken()
+	if err != nil {
+		return err
+	}
+	d.logf("state", "the response woke the Actor %s after the call; worker before %s, after %s", time.Since(askedAt).Round(time.Second), workerBefore, workerAfter)
+	if err := d.waitRouteReady(); err != nil {
+		return err
+	}
+	code, body, err = d.actorGet("/fetch/result?wait=30s")
+	if err != nil {
+		return fmt.Errorf("fetch result: %w", err)
+	}
+	if code != http.StatusOK || !strings.HasPrefix(body, "200 ") {
+		return fmt.Errorf("fetch result: HTTP %d: %s", code, body)
+	}
+	d.logf("egress", "http.Get returned %q; the Actor's code saw one ordinary blocking call", body)
+	d.logf("done", "called http.Get on worker %s, suspended while blocked, woken by the response and finished on worker %s", workerBefore, workerAfter)
+	return nil
+}
+
+// suspendUntilWoken suspends the Actor with a reply outstanding and waits for
+// that reply to bring it back. It returns the worker the Actor came back on.
+func (d *demo) suspendUntilWoken() (string, error) {
+	time.Sleep(time.Second)
+	if err := d.suspend(); err != nil {
+		return "", err
+	}
+	d.logf("info", "suspended with the request outstanding: the anchor keeps the connection to the echo target open and will wake the Actor when the reply arrives")
+	if err := d.waitStateFor("RUNNING", d.slowDelay+90*time.Second); err != nil {
+		return "", fmt.Errorf("the reply did not wake the Actor: %w", err)
+	}
+	d.mu.Lock()
+	worker := d.worker
+	d.mu.Unlock()
+	return worker, nil
 }
 
 // egressCall sends one /egress request to the Actor. A 409 "not open" means
@@ -835,6 +895,7 @@ const page = `<!DOCTYPE html>
 <div class="bar">
  <button class="primary" onclick="post('sequence')">Run the whole sequence</button>
  <button class="primary" onclick="post('slow')">Slow request: ask, suspend, wake on the reply</button>
+ <button class="primary" onclick="post('slowhttp')">Slow HTTP request: block in http.Get, suspend, wake on the response</button>
  <button onclick="post('connect')">Connect WebSocket</button>
  <button onclick="post('send')">Send a message</button>
  <button onclick="post('egress/open')">Open egress</button>
