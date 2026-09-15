@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -218,15 +219,7 @@ func TestActorEgressSurvivesSuspend(t *testing.T) {
 	actorRef := resources.ActorRef{Atespace: networkingAtespace, Name: actorName}
 	clients := e2e.GetClients()
 
-	get := func(path string) (int, string) {
-		resp, err := router.Get(ctx, actorRef, path)
-		if err != nil {
-			t.Fatalf("GET %s: %v", path, err)
-		}
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
-		return resp.StatusCode, strings.TrimSpace(string(body))
-	}
+	get := routerGet(t, ctx, router, actorRef)
 	waitForRouteReady(t, "Actor readyz before egress", func() (*http.Response, error) {
 		return router.Get(ctx, actorRef, "/readyz")
 	})
@@ -256,6 +249,94 @@ func TestActorEgressSurvivesSuspend(t *testing.T) {
 		t.Fatalf("egress connection changed across suspend: before %q, after %q", statusBefore, statusAfter)
 	}
 	t.Log("egress connection survived suspend and resume: echo succeeded on the same connection")
+}
+
+// TestActorEgressResponseWakesActor: the Actor asks the echo target for a
+// reply that takes 20 seconds, is suspended while it waits, and is woken by
+// that reply arriving at the anchor. Nothing calls Resume. The reply is then
+// read on the connection the Actor opened before the suspend, whichever
+// worker it came back on.
+func TestActorEgressResponseWakesActor(t *testing.T) {
+	ctx := context.Background()
+	actorName, _ := createAndResumeActor(t, ctx, "egress-wake", counterPreserveFixture())
+	router := mustRouterClient(t, ctx)
+	defer router.Close()
+	actorRef := resources.ActorRef{Atespace: networkingAtespace, Name: actorName}
+	clients := e2e.GetClients()
+	get := routerGet(t, ctx, router, actorRef)
+
+	waitForRouteReady(t, "Actor readyz before egress", func() (*http.Response, error) {
+		return router.Get(ctx, actorRef, "/readyz")
+	})
+	if code, body := get("/egress/open?addr=" + echoTargetAddress); code != http.StatusOK {
+		t.Fatalf("egress open returned HTTP %d: %s", code, body)
+	}
+	_, statusBefore := get("/egress/status")
+	_, workerBefore := networkingActorStatus(ctx, t, clients, actorName)
+
+	const replyDelay = 20 * time.Second
+	if code, body := get("/egress/request?msg=" + url.QueryEscape("delay=20s late")); code != http.StatusOK {
+		t.Fatalf("egress request returned HTTP %d: %s", code, body)
+	}
+	askedAt := time.Now()
+	t.Logf("asked the echo target for a reply in %s while on %s", replyDelay, workerBefore)
+
+	suspendNetworkingActor(ctx, t, clients, actorName)
+	waitForNetworkingActorState(ctx, t, clients, actorName, ateapipb.ActorState_ACTOR_STATE_SUSPENDED)
+	t.Log("actor suspended while its request is outstanding")
+
+	// Nothing may wake the Actor before the reply exists. The check stops a
+	// little before the reply is due so it cannot race the wake.
+	for time.Now().Before(askedAt.Add(replyDelay - 5*time.Second)) {
+		if state, worker := networkingActorStatus(ctx, t, clients, actorName); state != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
+			t.Fatalf("actor left SUSPENDED (%v on %q) before its reply could exist", state, worker)
+		}
+		time.Sleep(time.Second)
+	}
+
+	waitForNetworkingActorState(ctx, t, clients, actorName, ateapipb.ActorState_ACTOR_STATE_RUNNING)
+	_, workerAfter := networkingActorStatus(ctx, t, clients, actorName)
+	t.Logf("the reply woke the actor %s after the request; worker before %q, after %q",
+		time.Since(askedAt).Round(time.Second), workerBefore, workerAfter)
+
+	waitForRouteReady(t, "Actor readyz after the wake", func() (*http.Response, error) {
+		return router.Get(ctx, actorRef, "/readyz")
+	})
+	if code, body := get("/egress/replies?wait=30s"); code != http.StatusOK || body != "late" {
+		t.Fatalf("egress replies after the wake = %d %q, want 200 \"late\"", code, body)
+	}
+	if _, statusAfter := get("/egress/status"); statusAfter != statusBefore {
+		t.Fatalf("egress connection changed across the suspend: before %q, after %q", statusBefore, statusAfter)
+	}
+	t.Log("the reply was delivered on the connection opened before the suspend")
+}
+
+// routerGet returns a helper that sends one GET to the Actor through the
+// router and returns the status code and the trimmed body.
+func routerGet(t *testing.T, ctx context.Context, router *e2e.RouterClient, actorRef resources.ActorRef) func(path string) (int, string) {
+	return func(path string) (int, string) {
+		t.Helper()
+		resp, err := router.Get(ctx, actorRef, path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, strings.TrimSpace(string(body))
+	}
+}
+
+// networkingActorStatus returns the Actor's state and its worker pod, which
+// is empty while it has none.
+func networkingActorStatus(ctx context.Context, t *testing.T, clients *e2e.Clients, name string) (ateapipb.ActorState, string) {
+	t.Helper()
+	resp, err := clients.SubstrateAPI.GetActor(ctx, &ateapipb.GetActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: networkingAtespace, Name: name},
+	})
+	if err != nil {
+		t.Fatalf("GetActor %s: %v", name, err)
+	}
+	return resp.GetStatus().GetState(), resp.GetStatus().GetWorkerAssignment().GetWorkerPod()
 }
 
 func dialWebSocketWithRetry(t *testing.T, ctx context.Context, router *e2e.RouterClient, actorRef resources.ActorRef) *websocket.Conn {
