@@ -16,6 +16,7 @@ package anchornet
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -113,6 +114,55 @@ func TestRedirectEgress_TCP(t *testing.T) {
 	}
 	if _, err := OriginalDestination(conn); err == nil {
 		t.Error("OriginalDestination accepted a plain connection")
+	}
+}
+
+// TestRedirectEgress_CloseWriteReachesTheSandbox: when the far end stops
+// sending, the sandbox reads end of stream while its own writes still flow.
+func TestRedirectEgress_CloseWriteReachesTheSandbox(t *testing.T) {
+	anchor, sandbox := egressPair(t)
+	ln, err := anchor.ListenRedirectedTCP(egressTCPPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			accepted <- c
+		}
+	}()
+
+	far := tcpip.FullAddress{Addr: tcpip.AddrFrom4([4]byte{203, 0, 113, 9}), Port: 8080}
+	dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dcancel()
+	conn, err := gonet.DialContextTCP(dctx, sandbox.Stack(), far, ipv4.ProtocolNumber)
+	if err != nil {
+		t.Fatalf("sandbox dial through the anchor: %v", err)
+	}
+	defer conn.Close()
+	var rc net.Conn
+	select {
+	case rc = <-accepted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("redirected connection was not accepted")
+	}
+	defer rc.Close()
+
+	if err := rc.(interface{ CloseWrite() error }).CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("sandbox read after the far end's half-close = %v, want EOF", err)
+	}
+	if _, err := conn.Write([]byte("still here")); err != nil {
+		t.Fatalf("sandbox write after the half-close: %v", err)
+	}
+	buf := make([]byte, 10)
+	_ = rc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(rc, buf); err != nil || string(buf) != "still here" {
+		t.Fatalf("anchor read after the half-close = %q, %v", buf, err)
 	}
 }
 

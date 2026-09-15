@@ -109,6 +109,16 @@ type RedirectedConn struct {
 	OriginalDestination *net.TCPAddr
 }
 
+// CloseWrite passes a half-close from the far end on to the sandbox, so the
+// application there reads end of stream instead of keeping a connection
+// that has nothing behind it.
+func (c *RedirectedConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
 // OriginalDestination reports where a RedirectedConn was going. It has the
 // shape atunnel's egress proxy expects.
 func OriginalDestination(conn net.Conn) (string, error) {

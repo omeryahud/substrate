@@ -549,7 +549,7 @@ func (d *demo) egressSend() error {
 	state := d.state
 	d.mu.Unlock()
 	start := time.Now()
-	code, body, err := d.actorGet(fmt.Sprintf("/egress/send?msg=egress+%d", n))
+	code, body, err := d.egressCall(fmt.Sprintf("/egress/send?msg=egress+%d", n))
 	if err != nil {
 		return fmt.Errorf("egress send: %w", err)
 	}
@@ -659,12 +659,8 @@ func (d *demo) slowRequest() error {
 			return err
 		}
 	}
-	before, err := d.egressReplies(0, 0)
-	if err != nil {
-		return err
-	}
 	msg := fmt.Sprintf("delay=%s slow reply %d", d.slowDelay, n)
-	code, body, err := d.actorGet("/egress/request?msg=" + url.QueryEscape(msg))
+	code, body, err := d.egressCall("/egress/request?msg=" + url.QueryEscape(msg))
 	if err != nil {
 		return fmt.Errorf("egress request: %w", err)
 	}
@@ -672,6 +668,10 @@ func (d *demo) slowRequest() error {
 		return fmt.Errorf("egress request: HTTP %d: %s", code, body)
 	}
 	askedAt := time.Now()
+	before, err := d.egressReplies(0, 0)
+	if err != nil {
+		return err
+	}
 	d.logf("egress", "Actor asked the echo target for a reply in %s (slow request %d) and went on; nothing inside it is blocked on the answer", d.slowDelay, n)
 	time.Sleep(time.Second)
 	if err := d.suspend(); err != nil {
@@ -698,6 +698,22 @@ func (d *demo) slowRequest() error {
 	d.logf("egress", "Actor read %q on the same egress connection (%s), %s after asking", lines[len(lines)-1], egress, time.Since(askedAt).Round(time.Second))
 	d.logf("done", "asked on worker %s, suspended, woken by the reply and answered on worker %s, one egress connection throughout", workerBefore, workerAfter)
 	return nil
+}
+
+// egressCall sends one /egress request to the Actor. A 409 "not open" means
+// the far end closed the connection, most often the egress gateway dropping
+// a tunnel that stayed idle for five minutes; the demo opens a new one and
+// tries again.
+func (d *demo) egressCall(path string) (int, string, error) {
+	code, body, err := d.actorGet(path)
+	if err != nil || code != http.StatusConflict || body != "not open" {
+		return code, body, err
+	}
+	d.logf("info", "the Actor's egress connection was closed by the far end (the egress gateway drops tunnels idle for five minutes); opening a new one")
+	if err := d.egressOpen(); err != nil {
+		return 0, "", err
+	}
+	return d.actorGet(path)
 }
 
 // egressReplies lists the reply lines the Actor has collected, waiting up to
