@@ -601,7 +601,12 @@ detached. Behavior while held:
   held connection triggers `ResumeActor` through the same resumer and parking
   lot the router uses. A new ingress dial for a detached Actor waits for
   attach the same way (this closes today's race between ext_proc's resume and
-  the Actor being suspended again).
+  the Actor being suspended again). ateapi quiesces the stack before the
+  checkpoint, while the Actor is still attached; a reply that lands in that
+  window is held and wakes the Actor at the detach, and a failed resume is
+  retried after the wake interval while data is still held. This is what
+  makes the slow request pattern work: the Actor asks, is suspended while it
+  waits, and the reply itself brings it back.
 - **Far end closes.** A FIN or RST from the far end is not acted on until the
   Actor is back: the anchor keeps the endpoint and delivers the close on
   reattach, so the application sees an orderly end of stream.
@@ -956,6 +961,14 @@ against a WorkerPool of at least two workers, on gVisor and on
   through the egress gateway; suspend and resume; the connection still works.
 - Wake on data: suspend, then send on the open WebSocket; the Actor becomes
   `RUNNING` without an explicit Resume and the echo arrives.
+- Slow request (`TestActorEgressResponseWakesActor`): the Actor sends
+  `/egress/request` with a `delay=20s` line, the echo target answers 20
+  seconds later, the Actor is suspended in between and must stay suspended
+  until the reply is due, then come back `RUNNING` with no Resume call and
+  read the reply through `/egress/replies` on the connection it opened
+  before the suspend. The counter's TCP echo delays a line that starts with
+  `delay=<duration> `; `/egress/request` sends without waiting and a
+  background reader collects the replies.
 - A `Reset` template keeps today's behavior (connection closed at suspend).
 - Raw TCP through `RouterClient.Connect` once CONNECT is routed to the
   anchor's relay.
