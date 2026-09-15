@@ -179,6 +179,8 @@ func main() {
 	egress := &egressConnection{}
 	defaultMux.HandleFunc("/egress/open", egress.open)
 	defaultMux.HandleFunc("/egress/send", egress.send)
+	defaultMux.HandleFunc("/egress/request", egress.request)
+	defaultMux.HandleFunc("/egress/replies", egress.replies)
 	defaultMux.HandleFunc("/egress/status", egress.status)
 	defaultMux.HandleFunc("/egress/close", egress.close)
 
@@ -225,10 +227,7 @@ func main() {
 					slog.ErrorContext(ctx, "Counter TCP echo accept failed", slog.Any("err", err))
 					return
 				}
-				go func() {
-					defer conn.Close()
-					_, _ = io.Copy(conn, conn)
-				}()
+				go echoLines(conn)
 			}
 		}()
 	}
