@@ -718,7 +718,7 @@ func (d *demo) slowHTTP() error {
 	if err != nil {
 		return fmt.Errorf("fetch start: %w", err)
 	}
-	if code != http.StatusOK {
+	if code != http.StatusOK || !strings.HasSuffix(body, ", request sent") {
 		return fmt.Errorf("fetch start: HTTP %d: %s", code, body)
 	}
 	askedAt := time.Now()

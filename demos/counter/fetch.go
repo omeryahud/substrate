@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"sync"
 	"time"
 )
@@ -43,6 +44,7 @@ func serveDelay(w http.ResponseWriter, r *http.Request) {
 type fetchRun struct {
 	url     string
 	started time.Time
+	sent    chan struct{}
 	done    chan struct{}
 	status  int
 	body    string
@@ -67,10 +69,17 @@ type fetcher struct {
 }
 
 func (f *fetcher) run(url string) *fetchRun {
-	run := &fetchRun{url: url, started: time.Now(), done: make(chan struct{})}
+	run := &fetchRun{url: url, started: time.Now(), sent: make(chan struct{}), done: make(chan struct{})}
 	go func() {
 		defer close(run.done)
-		resp, err := f.client.Get(url)
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			run.err = err
+			return
+		}
+		var once sync.Once
+		trace := &httptrace.ClientTrace{WroteRequest: func(httptrace.WroteRequestInfo) { once.Do(func() { close(run.sent) }) }}
+		resp, err := f.client.Do(req.WithContext(httptrace.WithClientTrace(req.Context(), trace)))
 		run.elapsed = time.Since(run.started)
 		if err != nil {
 			run.err = err
@@ -98,7 +107,9 @@ func (f *fetcher) fetch(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// start runs the GET in the background and answers at once.
+// start runs the GET in the background and answers once the request is on
+// the wire, so a caller that suspends the Actor next knows the response is
+// the only thing the call still waits for.
 func (f *fetcher) start(w http.ResponseWriter, r *http.Request) {
 	url := r.URL.Query().Get("url")
 	if url == "" {
@@ -106,17 +117,26 @@ func (f *fetcher) start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.latest != nil {
 		select {
 		case <-f.latest.done:
 		default:
+			f.mu.Unlock()
 			http.Error(w, "a fetch is still pending", http.StatusConflict)
 			return
 		}
 	}
-	f.latest = f.run(url)
-	fmt.Fprintf(w, "started GET %s\n", url)
+	run := f.run(url)
+	f.latest = run
+	f.mu.Unlock()
+	select {
+	case <-run.sent:
+		fmt.Fprintf(w, "started GET %s, request sent\n", url)
+	case <-run.done:
+		fmt.Fprintf(w, "GET %s ended at once: %s\n", url, run)
+	case <-time.After(10 * time.Second):
+		fmt.Fprintf(w, "started GET %s, request not sent yet\n", url)
+	}
 }
 
 // result answers with the outcome of the latest GET, waiting up to

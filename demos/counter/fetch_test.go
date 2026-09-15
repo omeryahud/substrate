@@ -50,8 +50,8 @@ func TestFetcherStartAndResult(t *testing.T) {
 	if code, body := call(t, f.result, nil); code != http.StatusNotFound {
 		t.Fatalf("result before any fetch = %d %q, want 404", code, body)
 	}
-	if code, body := call(t, f.start, url.Values{"url": {target}}); code != http.StatusOK || !strings.HasPrefix(body, "started GET ") {
-		t.Fatalf("start = %d %q", code, body)
+	if code, body := call(t, f.start, url.Values{"url": {target}}); code != http.StatusOK || !strings.HasSuffix(strings.TrimSpace(body), ", request sent") {
+		t.Fatalf("start = %d %q, want it to return once the request is sent", code, body)
 	}
 	if code, body := call(t, f.result, nil); code != http.StatusOK || !strings.HasPrefix(body, "pending for ") {
 		t.Fatalf("result right after start = %d %q, want pending", code, body)
@@ -65,6 +65,16 @@ func TestFetcherStartAndResult(t *testing.T) {
 	}
 	if code, body := call(t, f.start, url.Values{"url": {target}}); code != http.StatusOK {
 		t.Fatalf("start after the previous fetch finished = %d %q", code, body)
+	}
+}
+
+// TestFetcherStartReportsAFailedCall: a GET that cannot even connect ends at
+// once, and start says so instead of claiming the request was sent.
+func TestFetcherStartReportsAFailedCall(t *testing.T) {
+	f := &fetcher{}
+	code, body := call(t, f.start, url.Values{"url": {"http://127.0.0.1:1/"}})
+	if code != http.StatusOK || !strings.HasPrefix(body, "GET http://127.0.0.1:1/ ended at once: error ") {
+		t.Fatalf("start against a closed port = %d %q", code, body)
 	}
 }
 

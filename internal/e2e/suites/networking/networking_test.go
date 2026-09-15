@@ -319,8 +319,8 @@ func TestActorHTTPResponseWakesActor(t *testing.T) {
 	_, workerBefore := networkingActorStatus(ctx, t, clients, actorName)
 	const replyDelay = 20 * time.Second
 	target := "http://" + echoTargetHost + "/delay?d=20s"
-	if code, body := get("/fetch/start?url=" + url.QueryEscape(target)); code != http.StatusOK {
-		t.Fatalf("fetch start returned HTTP %d: %s", code, body)
+	if code, body := get("/fetch/start?url=" + url.QueryEscape(target)); code != http.StatusOK || !strings.HasSuffix(body, ", request sent") {
+		t.Fatalf("fetch start = HTTP %d %q, want the request on the wire before the suspend", code, body)
 	}
 	askedAt := time.Now()
 	t.Logf("actor on %s is blocked in http.Get(%s)", workerBefore, target)
