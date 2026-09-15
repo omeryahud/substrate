@@ -28,6 +28,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -49,6 +50,7 @@ func main() {
 	atespace := flag.String("atespace", "preserve-demo", "atespace for the demo Actor")
 	templateNS := flag.String("template-namespace", "ate-demo-counter", "ActorTemplate namespace")
 	template := flag.String("template", "counter-preserve", "ActorTemplate with ate.dev/connection-policy=Preserve")
+	slowDelay := flag.Duration("slow-reply-delay", 30*time.Second, "how long the echo target takes to answer the slow request")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -59,6 +61,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	d.slowDelay = *slowDelay
 	defer d.cleanup()
 
 	mux := http.NewServeMux()
@@ -72,6 +75,7 @@ func main() {
 	mux.HandleFunc("/api/egress/open", d.action(d.egressOpen))
 	mux.HandleFunc("/api/egress/send", d.action(d.egressSend))
 	mux.HandleFunc("/api/sequence", d.action(d.sequence))
+	mux.HandleFunc("/api/slow", d.action(d.slowRequest))
 	mux.HandleFunc("/api/quit", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK); stop() })
 	srv := &http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
@@ -120,6 +124,8 @@ type demo struct {
 	busy        bool
 	egressSent  int
 	egressState string
+	slowDelay   time.Duration
+	slowCount   int
 	log         []event
 	subscribers map[chan event]struct{}
 }
@@ -557,14 +563,10 @@ func (d *demo) egressSend() error {
 // sequence runs the whole story: connect, echo, open egress, suspend, send
 // while suspended, resume, echo again on both connections.
 func (d *demo) sequence() error {
-	d.mu.Lock()
-	if d.busy {
-		d.mu.Unlock()
+	if !d.setBusy() {
 		return errors.New("a sequence is already running")
 	}
-	d.busy = true
-	d.mu.Unlock()
-	defer func() { d.mu.Lock(); d.busy = false; d.mu.Unlock() }()
+	defer d.clearBusy()
 
 	d.mu.Lock()
 	connected := d.ws != nil
@@ -620,6 +622,98 @@ func (d *demo) sequence() error {
 		}
 	}
 	return nil
+}
+
+func (d *demo) setBusy() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.busy {
+		return false
+	}
+	d.busy = true
+	return true
+}
+
+func (d *demo) clearBusy() {
+	d.mu.Lock()
+	d.busy = false
+	d.mu.Unlock()
+}
+
+// slowRequest is the story the feature exists for: the Actor asks for a
+// reply that takes a while, is suspended while it waits, and the reply
+// itself wakes it, on whichever worker has room.
+func (d *demo) slowRequest() error {
+	if !d.setBusy() {
+		return errors.New("a sequence is already running")
+	}
+	defer d.clearBusy()
+	d.mu.Lock()
+	egressOpen := d.egressState != ""
+	workerBefore := d.worker
+	d.slowCount++
+	n := d.slowCount
+	d.mu.Unlock()
+	if !egressOpen {
+		if err := d.egressOpen(); err != nil {
+			return err
+		}
+	}
+	before, err := d.egressReplies(0, 0)
+	if err != nil {
+		return err
+	}
+	msg := fmt.Sprintf("delay=%s slow reply %d", d.slowDelay, n)
+	code, body, err := d.actorGet("/egress/request?msg=" + url.QueryEscape(msg))
+	if err != nil {
+		return fmt.Errorf("egress request: %w", err)
+	}
+	if code != http.StatusOK {
+		return fmt.Errorf("egress request: HTTP %d: %s", code, body)
+	}
+	askedAt := time.Now()
+	d.logf("egress", "Actor asked the echo target for a reply in %s (slow request %d) and went on; nothing inside it is blocked on the answer", d.slowDelay, n)
+	time.Sleep(time.Second)
+	if err := d.suspend(); err != nil {
+		return err
+	}
+	d.logf("info", "suspended with the request outstanding: the anchor keeps the connection to the echo target open and will wake the Actor when the reply arrives")
+	if err := d.waitStateFor("RUNNING", d.slowDelay+90*time.Second); err != nil {
+		return fmt.Errorf("the reply did not wake the Actor: %w", err)
+	}
+	d.mu.Lock()
+	workerAfter, egress := d.worker, d.egressState
+	d.mu.Unlock()
+	d.logf("state", "the reply woke the Actor %s after the request; worker before %s, after %s", time.Since(askedAt).Round(time.Second), workerBefore, workerAfter)
+	if err := d.waitRouteReady(); err != nil {
+		return err
+	}
+	lines, err := d.egressReplies(len(before), 30*time.Second)
+	if err != nil {
+		return err
+	}
+	if len(lines) <= len(before) {
+		return errors.New("the reply never reached the Actor")
+	}
+	d.logf("egress", "Actor read %q on the same egress connection (%s), %s after asking", lines[len(lines)-1], egress, time.Since(askedAt).Round(time.Second))
+	d.logf("done", "asked on worker %s, suspended, woken by the reply and answered on worker %s, one egress connection throughout", workerBefore, workerAfter)
+	return nil
+}
+
+// egressReplies lists the reply lines the Actor has collected, waiting up to
+// wait for more than after of them.
+func (d *demo) egressReplies(after int, wait time.Duration) ([]string, error) {
+	code, body, err := d.actorGet(fmt.Sprintf("/egress/replies?after=%d&wait=%s", after, wait))
+	if err != nil {
+		return nil, fmt.Errorf("egress replies: %w", err)
+	}
+	if code != http.StatusOK {
+		return nil, fmt.Errorf("egress replies: HTTP %d: %s", code, body)
+	}
+	if body == "" {
+		return nil, nil
+	}
+	return strings.Split(body, "\n"), nil
 }
 
 func (d *demo) serveStatus(w http.ResponseWriter, _ *http.Request) {
@@ -724,6 +818,7 @@ const page = `<!DOCTYPE html>
 </header>
 <div class="bar">
  <button class="primary" onclick="post('sequence')">Run the whole sequence</button>
+ <button class="primary" onclick="post('slow')">Slow request: ask, suspend, wake on the reply</button>
  <button onclick="post('connect')">Connect WebSocket</button>
  <button onclick="post('send')">Send a message</button>
  <button onclick="post('egress/open')">Open egress</button>
