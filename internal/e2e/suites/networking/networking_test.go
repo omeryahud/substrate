@@ -205,7 +205,10 @@ func TestActorWakesOnData(t *testing.T) {
 
 // echoTargetAddress is the plain TCP echo service the counter demo deploys
 // outside any sandbox, reached from an Actor through the egress gateway.
-const echoTargetAddress = "echo-target.ate-demo-counter.svc.cluster.local:7777"
+const (
+	echoTargetHost    = "echo-target.ate-demo-counter.svc.cluster.local"
+	echoTargetAddress = echoTargetHost + ":7777"
+)
 
 // TestActorEgressSurvivesSuspend is the egress half of the connection
 // preservation claim: an outbound connection the Actor opened before Suspend
@@ -281,21 +284,7 @@ func TestActorEgressResponseWakesActor(t *testing.T) {
 	askedAt := time.Now()
 	t.Logf("asked the echo target for a reply in %s while on %s", replyDelay, workerBefore)
 
-	suspendNetworkingActor(ctx, t, clients, actorName)
-	waitForNetworkingActorState(ctx, t, clients, actorName, ateapipb.ActorState_ACTOR_STATE_SUSPENDED)
-	t.Log("actor suspended while its request is outstanding")
-
-	// Nothing may wake the Actor before the reply exists. The check stops a
-	// little before the reply is due so it cannot race the wake.
-	for time.Now().Before(askedAt.Add(replyDelay - 5*time.Second)) {
-		if state, worker := networkingActorStatus(ctx, t, clients, actorName); state != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
-			t.Fatalf("actor left SUSPENDED (%v on %q) before its reply could exist", state, worker)
-		}
-		time.Sleep(time.Second)
-	}
-
-	waitForNetworkingActorState(ctx, t, clients, actorName, ateapipb.ActorState_ACTOR_STATE_RUNNING)
-	_, workerAfter := networkingActorStatus(ctx, t, clients, actorName)
+	workerAfter := suspendAndWaitForWake(ctx, t, clients, actorName, askedAt, replyDelay)
 	t.Logf("the reply woke the actor %s after the request; worker before %q, after %q",
 		time.Since(askedAt).Round(time.Second), workerBefore, workerAfter)
 
@@ -309,6 +298,67 @@ func TestActorEgressResponseWakesActor(t *testing.T) {
 		t.Fatalf("egress connection changed across the suspend: before %q, after %q", statusBefore, statusAfter)
 	}
 	t.Log("the reply was delivered on the connection opened before the suspend")
+}
+
+// TestActorHTTPResponseWakesActor: a goroutine in the Actor blocks in a
+// plain http.Get whose response takes 20 seconds. The Actor is suspended
+// while the call is blocked, the response wakes it, and the call returns as
+// if nothing had happened.
+func TestActorHTTPResponseWakesActor(t *testing.T) {
+	ctx := context.Background()
+	actorName, _ := createAndResumeActor(t, ctx, "http-wake", counterPreserveFixture())
+	router := mustRouterClient(t, ctx)
+	defer router.Close()
+	actorRef := resources.ActorRef{Atespace: networkingAtespace, Name: actorName}
+	clients := e2e.GetClients()
+	get := routerGet(t, ctx, router, actorRef)
+
+	waitForRouteReady(t, "Actor readyz before the fetch", func() (*http.Response, error) {
+		return router.Get(ctx, actorRef, "/readyz")
+	})
+	_, workerBefore := networkingActorStatus(ctx, t, clients, actorName)
+	const replyDelay = 20 * time.Second
+	target := "http://" + echoTargetHost + "/delay?d=20s"
+	if code, body := get("/fetch/start?url=" + url.QueryEscape(target)); code != http.StatusOK {
+		t.Fatalf("fetch start returned HTTP %d: %s", code, body)
+	}
+	askedAt := time.Now()
+	t.Logf("actor on %s is blocked in http.Get(%s)", workerBefore, target)
+
+	workerAfter := suspendAndWaitForWake(ctx, t, clients, actorName, askedAt, replyDelay)
+	t.Logf("the response woke the actor %s after the call; worker before %q, after %q",
+		time.Since(askedAt).Round(time.Second), workerBefore, workerAfter)
+
+	waitForRouteReady(t, "Actor readyz after the wake", func() (*http.Response, error) {
+		return router.Get(ctx, actorRef, "/readyz")
+	})
+	code, body := get("/fetch/result?wait=30s")
+	if code != http.StatusOK || !strings.HasPrefix(body, "200 delayed 20s after ") {
+		t.Fatalf("fetch result after the wake = %d %q, want \"200 delayed 20s after ...\"", code, body)
+	}
+	t.Logf("http.Get returned normally: %s", body)
+}
+
+// suspendAndWaitForWake suspends the Actor while a reply is outstanding,
+// checks it stays suspended until that reply is due, waits for data to bring
+// it back, and returns the worker it came back on.
+func suspendAndWaitForWake(ctx context.Context, t *testing.T, clients *e2e.Clients, actorName string, askedAt time.Time, replyDelay time.Duration) string {
+	t.Helper()
+	suspendNetworkingActor(ctx, t, clients, actorName)
+	waitForNetworkingActorState(ctx, t, clients, actorName, ateapipb.ActorState_ACTOR_STATE_SUSPENDED)
+	t.Log("actor suspended while its request is outstanding")
+
+	// Nothing may wake the Actor before the reply exists. The check stops a
+	// little before the reply is due so it cannot race the wake.
+	for time.Now().Before(askedAt.Add(replyDelay - 5*time.Second)) {
+		if state, worker := networkingActorStatus(ctx, t, clients, actorName); state != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
+			t.Fatalf("actor left SUSPENDED (%v on %q) before its reply could exist", state, worker)
+		}
+		time.Sleep(time.Second)
+	}
+	waitForNetworkingActorState(ctx, t, clients, actorName, ateapipb.ActorState_ACTOR_STATE_RUNNING)
+	_, worker := networkingActorStatus(ctx, t, clients, actorName)
+	return worker
 }
 
 // routerGet returns a helper that sends one GET to the Actor through the
