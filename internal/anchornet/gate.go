@@ -32,6 +32,7 @@ type writeGate struct {
 	// anchor can wake a held actor that has data waiting.
 	onBlocked func()
 	notified  bool
+	held      int
 }
 
 func newWriteGate() *writeGate {
@@ -76,16 +77,38 @@ func (g *writeGate) wait(closed <-chan struct{}) bool {
 	if notify {
 		g.notified = true
 	}
+	if blocked {
+		g.held++
+	}
 	g.mu.Unlock()
 	if notify {
 		g.onBlocked()
 	}
+	var ok bool
 	select {
 	case <-open:
-		return true
+		ok = true
 	case <-closed:
-		return false
+		ok = false
 	}
+	if blocked {
+		g.mu.Lock()
+		g.held--
+		g.mu.Unlock()
+	}
+	return ok
+}
+
+func (g *writeGate) rearm() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.notified = false
+}
+
+func (g *writeGate) heldWriters() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.held
 }
 
 // Quiesce holds every write toward the actor until Unquiesce.
@@ -96,6 +119,12 @@ func (s *Stack) Unquiesce() { s.gate.unquiesce() }
 
 // Quiesced reports whether writes toward the actor are held.
 func (s *Stack) Quiesced() bool { return s.gate.isQuiesced() }
+
+// HeldWriters counts the writes toward the actor that are waiting on the gate.
+func (s *Stack) HeldWriters() int { return s.gate.heldWriters() }
+
+// RearmWriteNotify lets the next held write run the OnWriteBlocked hook again.
+func (s *Stack) RearmWriteNotify() { s.gate.rearm() }
 
 // OnWriteBlocked sets the function run when a write is first held after a
 // Quiesce. The anchor uses it to wake an actor that has data waiting.

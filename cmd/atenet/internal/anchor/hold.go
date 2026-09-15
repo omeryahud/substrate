@@ -94,9 +94,39 @@ var (
 
 // markHeld is the transition into the held state: writes toward the actor
 // stop, and the first one that is held wakes the actor if its template asked
-// for it. Nothing retransmits toward a sandbox that is not there.
+// for it. ateapi quiesces the stack before the checkpoint, while the actor
+// is still attached, so a write held since then wakes the actor now.
 func (a *Anchor) markHeld(entry *actorEntry) {
 	entry.stack.Quiesce()
+	entry.stack.RearmWriteNotify()
+	if entry.stack.HeldWriters() > 0 {
+		a.wake(entry)
+	}
+}
+
+// retryWake tries again after the wake interval while data is still held,
+// so one failed resume does not leave the actor asleep on its data.
+func (a *Anchor) retryWake(entry *actorEntry) {
+	entry.stack.RearmWriteNotify()
+	if entry.stack.HeldWriters() == 0 {
+		return
+	}
+	interval := a.cfg.Hold.WakeInterval
+	if interval <= 0 {
+		interval = time.Second
+	}
+	time.AfterFunc(interval, func() {
+		if a.holds(entry) {
+			a.wake(entry)
+		}
+	})
+}
+
+// holds reports whether entry is still the anchor's record for its actor.
+func (a *Anchor) holds(entry *actorEntry) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.actors[entry.ref] == entry
 }
 
 // wake asks the control plane to resume a held actor because data arrived
@@ -123,6 +153,7 @@ func (a *Anchor) wake(entry *actorEntry) {
 		if err != nil {
 			slog.WarnContext(ctx, "anchor: wake on data failed", slog.Any("actor", entry.ref), slog.Any("err", err))
 			a.metrics.recordWake(ctx, outcomeFailed)
+			a.retryWake(entry)
 			return
 		}
 		slog.InfoContext(ctx, "anchor: woke actor on data", slog.Any("actor", entry.ref))

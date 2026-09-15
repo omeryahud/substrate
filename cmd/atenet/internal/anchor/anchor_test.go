@@ -742,6 +742,121 @@ func TestServeStatusz(t *testing.T) {
 	}
 }
 
+// TestMarkHeldWakesAWriterHeldDuringTheCheckpoint: ateapi quiesces the stack
+// while the actor is still attached, so a write that arrives then cannot
+// wake it yet. The detach that follows must.
+func TestMarkHeldWakesAWriterHeldDuringTheCheckpoint(t *testing.T) {
+	a := newTestAnchor()
+	a.cfg.Hold.WakeInterval = time.Second
+	control := &countingControlPlane{}
+	a.controlPlane = control
+	entry, err := a.getOrCreate(context.Background(), resources.ActorRef{Atespace: "team-a", Name: "alpha"}, "uid-a", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer entry.stack.Close()
+	entry.wakeOnData = true
+	entry.detach = func() {}
+	entry.stack.Quiesce()
+
+	pipeA, pipeB := net.Pipe()
+	defer pipeB.Close()
+	go func() { _, _ = io.Copy(io.Discard, pipeB) }()
+	conn := entry.stack.GateWrites(pipeA)
+	defer conn.Close()
+	done := make(chan struct{})
+	go func() {
+		_, _ = conn.Write([]byte("reply that lands during the checkpoint"))
+		close(done)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for entry.stack.HeldWriters() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if entry.stack.HeldWriters() != 1 {
+		t.Fatal("the write was not held")
+	}
+	if control.resumes.Load() != 0 {
+		t.Fatalf("resume attempts while still attached = %d, want 0", control.resumes.Load())
+	}
+
+	entry.mu.Lock()
+	entry.detach = nil
+	entry.mu.Unlock()
+	a.markHeld(entry)
+	deadline = time.Now().Add(2 * time.Second)
+	for control.resumes.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if control.resumes.Load() != 1 {
+		t.Fatalf("resume attempts after the detach = %d, want 1", control.resumes.Load())
+	}
+	select {
+	case <-done:
+		t.Fatal("write went through while the actor is held")
+	default:
+	}
+	entry.stack.Unquiesce()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("write stayed held after the actor reattached")
+	}
+}
+
+type flakyControlPlane struct {
+	fakeAssignments
+	attempts  atomic.Int32
+	failFirst int32
+}
+
+func (c *flakyControlPlane) ResumeActor(context.Context, *ateapipb.ResumeActorRequest, ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+	if c.attempts.Add(1) <= c.failFirst {
+		return nil, errors.New("control plane unavailable")
+	}
+	return &ateapipb.ResumeActorResponse{}, nil
+}
+
+// TestWakeRetriesAfterAFailure: while data stays held, a failed resume is
+// tried again after the wake interval.
+func TestWakeRetriesAfterAFailure(t *testing.T) {
+	a := newTestAnchor()
+	a.cfg.Hold.WakeInterval = 30 * time.Millisecond
+	control := &flakyControlPlane{failFirst: 1}
+	a.controlPlane = control
+	entry, err := a.getOrCreate(context.Background(), resources.ActorRef{Atespace: "team-a", Name: "alpha"}, "uid-a", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer entry.stack.Close()
+	entry.wakeOnData = true
+	a.markHeld(entry)
+
+	pipeA, pipeB := net.Pipe()
+	defer pipeB.Close()
+	go func() { _, _ = io.Copy(io.Discard, pipeB) }()
+	conn := entry.stack.GateWrites(pipeA)
+	defer conn.Close()
+	done := make(chan struct{})
+	go func() {
+		_, _ = conn.Write([]byte("data for a suspended actor"))
+		close(done)
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for control.attempts.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := control.attempts.Load(); got < 2 {
+		t.Fatalf("resume attempts = %d, want a retry after the failure", got)
+	}
+	entry.stack.Unquiesce()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("write stayed held after Unquiesce")
+	}
+}
+
 // TestSweepHeld: a stack held past the TTL is dropped; attached stacks and
 // recent holds stay.
 func TestSweepHeld(t *testing.T) {

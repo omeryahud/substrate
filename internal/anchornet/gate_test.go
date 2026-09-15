@@ -90,6 +90,64 @@ func TestGateWrites_HoldsWritesWhileQuiesced(t *testing.T) {
 	}
 }
 
+// TestGateWrites_HeldWritersAndRearm: held writers are counted while they
+// wait, and RearmWriteNotify lets the next held write run the hook again.
+func TestGateWrites_HeldWritersAndRearm(t *testing.T) {
+	st, err := NewStack("10.0.0.1", 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	var woke atomic.Int32
+	st.OnWriteBlocked(func() { woke.Add(1) })
+	a, b := net.Pipe()
+	defer b.Close()
+	go func() { _, _ = io.Copy(io.Discard, b) }()
+	conn := st.GateWrites(a)
+	waitHeld := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for st.HeldWriters() != want && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if got := st.HeldWriters(); got != want {
+			t.Fatalf("HeldWriters = %d, want %d", got, want)
+		}
+	}
+
+	st.Quiesce()
+	done := make(chan error, 2)
+	write := func() {
+		_, err := conn.Write([]byte("held"))
+		done <- err
+	}
+	go write()
+	waitHeld(1)
+	if woke.Load() != 1 {
+		t.Fatalf("hook ran %d times, want 1", woke.Load())
+	}
+
+	st.RearmWriteNotify()
+	go write()
+	waitHeld(2)
+	if woke.Load() != 2 {
+		t.Fatalf("hook ran %d times after the rearm, want 2", woke.Load())
+	}
+
+	st.Unquiesce()
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("held write after Unquiesce: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("a write stayed held after Unquiesce")
+		}
+	}
+	waitHeld(0)
+}
+
 // TestWaitDrained: an idle stack drains at once; a bounded wait returns when
 // its context ends.
 func TestWaitDrained(t *testing.T) {
