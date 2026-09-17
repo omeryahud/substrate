@@ -1,8 +1,10 @@
 # Connection Preservation Across Suspend and Resume
 
-Status: design proposal, not implemented. Tracks
+Status: implemented on branch `worktree-design-tcp-connection-preservation`
+(gVisor path validated on kind, micro-VM path built but not exercised). Tracks
 [#465](https://github.com/agent-substrate/substrate/issues/465) (suspend-safe
-actor networking).
+actor networking); see "Alternatives" in the review pages for how this design
+relates to the in-sandbox proxy and TCP_REPAIR ideas discussed there.
 
 ## Summary
 
