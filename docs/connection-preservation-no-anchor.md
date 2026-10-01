@@ -46,7 +46,7 @@ flowchart LR
     C[client] --> RE[router pod, envoy container]
     RE -- preserved actor, localhost --> RH[router pod, atenet-router container:<br/>ingress holder]
     RE -- other actors, unchanged --> AI
-    RH -- mTLS, per request --> AI[worker: ateom atunnel ingress]
+    RH -- mTLS CONNECT relay --> AI[worker: ateom atunnel relay]
     AI -- kernel socket, moved with TCP_REPAIR --> SB[sandbox]
     SB -- intercepted --> AE[worker: ateom atunnel egress]
     AE -- mTLS with the actor certificate --> GH[gateway pod, ext-proc container:<br/>egress holder]
@@ -83,18 +83,23 @@ sequenceDiagram
     XP->>XP: look up actor X: worker address, preserve connections
     XP-->>RE: route to the holder, name the worker
     RE->>RH: request over localhost
-    RH->>AI: the same request over mTLS, as Envoy did before
-    AI->>AI: assign connection id N, open the kernel socket toward the sandbox
-    AI->>SB: request
-    AI-->>RH: response carries N
+    RH->>AI: CONNECT to the sandbox port over mTLS, connection id N
+    AI->>AI: open the kernel socket toward the sandbox, relay bytes both ways
+    RH->>SB: the request itself, HTTP/1.1 or HTTP/2, holder to sandbox end to end
+    SB-->>RH: response or upgraded bytes
     RH->>RH: remember N: worker A, not held
     RH-->>RE: response or upgraded bytes
     RE-->>C: response or upgraded bytes
 ```
 
 The router replica that receives the request is the one whose holder keeps
-the connection. The holder is a per-request proxy: a plain HTTP response ends
-the worker leg, a WebSocket or CONNECT keeps it until the connection closes.
+the connection. The holder is the actor's HTTP peer: it terminates whatever
+Envoy sends (HTTP/1.1, HTTP/2 and gRPC, WebSocket, CONNECT) and speaks to the
+sandbox end to end through the worker, which only relays bytes over its
+existing CONNECT path. Protocol state therefore lives in the holder and the
+sandbox, both of which survive a suspend, so an HTTP/2 session continues
+across a resume without either side noticing. The worker's relay socket is
+the unit that is held and rebound.
 
 ### Outbound
 
