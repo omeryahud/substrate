@@ -3,56 +3,32 @@
 Status: design for discussion. Nothing here is implemented yet. Tracks
 [#465](https://github.com/agent-substrate/substrate/issues/465).
 
-## The problem
-
-An agent spends most of its time waiting: on an LLM, a tool, a database, a
-human. Today that waiting pins the actor to a worker, because suspending it
-cuts every TCP connection it holds. The client's WebSocket drops, the outbound
-call that was in flight fails, and the actor comes back with a lap full of
-broken sockets. So the actors that would benefit most from suspension, the
-ones that wait, are exactly the ones that cannot be suspended.
-
-The goal is an actor that can be checkpointed with an inbound request open and
-an outbound call in progress, released from its worker, restored on any other
-worker, and woken by the first byte that arrives for it, while its code sees
-one ordinary blocking call that simply returns.
-
-## Why connections break, precisely
-
-A TCP connection is two endpoints. Each remembers where the conversation is:
-sequence numbers, buffers, options. The actor's own endpoint is already safe:
-gVisor saves connected sockets in the snapshot, so the sandbox half of every
-connection survives a checkpoint today.
-
-What dies is the other half. In Substrate the actor never talks to the far end
-directly. Inbound requests are forwarded by the router's Envoy to ateom on the
-worker, which proxies them into the sandbox. Outbound connections are
-intercepted on the worker and carried by ateom through a CONNECT tunnel to the
-egress gateway, which dials the remote service. So every actor connection has a
-peer socket inside ateom on the worker, and ateom's sockets die with the
-worker. Resuming elsewhere gives the actor a new worker with a new address,
-which TCP cannot follow.
-
-That peer socket has one helpful property: it is bound to the same link-local
-gateway address on every worker, `169.254.17.1`. It has a state problem, not an
-address problem. State can be moved.
-
 ## The idea
 
-Three observations make a design without any new component:
+Every connection an actor holds has two halves, and the snapshot already
+saves one of them: gVisor keeps connected sockets, so the actor's half of
+every connection survives a checkpoint today. The half that is lost is its
+peer inside ateom on the worker: the socket ateom's proxy opened into the
+sandbox for an inbound request, or the socket ateom accepted when it
+intercepted an outbound connection. Beyond ateom, the client's connection
+ends at the router's Envoy and the remote service's connection ends at the
+egress gateway's Envoy, both in pods that do not move.
 
-1. The far ends of an actor's connections already live in pods that do not
-   move. Inbound clients terminate at the router's Envoy. Outbound calls
-   terminate at the egress gateway's Envoy. Those legs do not have to move,
-   they have to wait.
-2. The only socket that must move is ateom's sandbox-facing socket, and Linux
-   can move it: `TCP_REPAIR` lets a privileged process dump a live socket's
-   state and recreate it elsewhere with the same addresses, ports and
+Three facts turn that into a design with no new component:
+
+1. The far ends do not have to move, they have to wait. The router's Envoy
+   and the gateway's Envoy keep their legs open as long as their upstream
+   stays open, so something in those pods has to stand in for the worker
+   while the actor is away.
+2. The only socket that must move is ateom's sandbox-facing one, and it is
+   bound to the same link-local gateway address on every worker,
+   `169.254.17.1`. It has a state problem, not an address problem, and Linux
+   can move state: `TCP_REPAIR` lets a privileged process dump a live
+   socket and recreate it elsewhere with the same addresses, ports and
    sequence numbers, with no handshake.
-3. Something has to wake the actor when data arrives while it sleeps. The
-   process that sees that data is the one holding the far end, and both the
-   router pod and the gateway pod already run a Go process next to Envoy that
-   talks to the control plane.
+3. Waking the actor needs the process that sees data arrive for it. That is
+   whoever holds the far end, and both the router pod and the gateway pod
+   already run a Go process next to Envoy that talks to the control plane.
 
 So: a small *holder* inside each of those two existing processes keeps the
 Envoy-facing leg of a connection open while the worker leg is gone, pauses the
